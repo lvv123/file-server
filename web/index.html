@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>文件服务器</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">文件服务器</div>
+  <div class="searchbox">
+    <input id="q" type="search" placeholder="搜索文件名（全库）" autocomplete="off">
+    <button id="btn-search" class="btn">搜索</button>
+    <button id="btn-clear" class="btn ghost" hidden>清除</button>
+  </div>
+  <button id="btn-admin" class="btn ghost">管理后台</button>
+</header>
+
+<nav id="crumbs" class="crumbs"></nav>
+
+<main>
+  <div class="toolbar">
+    <button id="btn-mkdir" class="btn">新建文件夹</button>
+    <button id="btn-upload" class="btn primary">上传文件</button>
+    <input id="file-input" type="file" multiple hidden>
+    <button id="btn-refresh" class="btn ghost">刷新</button>
+  </div>
+
+  <div id="uploads" class="uploads"></div>
+
+  <div id="browser">
+    <table class="listing">
+      <thead>
+        <tr><th>名称</th><th class="num">大小</th><th>修改时间</th><th class="ops">操作</th></tr>
+      </thead>
+      <tbody id="listing"></tbody>
+    </table>
+    <div id="empty" class="empty" hidden>这里还没有文件</div>
+  </div>
+
+  <div id="search-view" hidden>
+    <h2 class="section-title">搜索结果</h2>
+    <table class="listing">
+      <thead>
+        <tr><th>名称</th><th class="num">大小</th><th>位置</th><th class="ops">操作</th></tr>
+      </thead>
+      <tbody id="search-results"></tbody>
+    </table>
+  </div>
+</main>
+
+<section id="admin" class="admin" hidden>
+  <div class="admin-panel">
+    <div class="admin-head">
+      <h2>管理后台</h2>
+      <button id="btn-admin-close" class="btn ghost">关闭</button>
+    </div>
+    <div id="admin-status" class="cards"></div>
+    <h3 class="section-title">最近审计记录</h3>
+    <div class="table-wrap">
+      <table class="listing audit">
+        <thead>
+          <tr><th>时间</th><th>来源</th><th>操作</th><th>路径</th><th>结果</th><th class="num">耗时</th></tr>
+        </thead>
+        <tbody id="audit-rows"></tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<div id="toast" class="toast" hidden></div>
+<script src="/app.js"></script>
+</body>
+</html>
