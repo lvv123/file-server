@@ -66,6 +66,10 @@ void FileServer::register_routes() {
                                     httplib::Response& res) {
     handle_download(ctx, req, res);
   });
+  svr_->Get("/api/resync", [&ctx](const httplib::Request& req,
+                                  httplib::Response& res) {
+    handle_resync(ctx, req, res);
+  });
   svr_->Post("/api/mkdir", [&ctx](const httplib::Request& req,
                                   httplib::Response& res) {
     handle_mkdir(ctx, req, res);

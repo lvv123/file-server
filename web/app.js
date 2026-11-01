@@ -212,6 +212,23 @@ async function doDelete(entry) {
   }
 }
 
+// Rebuilds the server-side index from what is actually on disk. Useful after
+// copying files into the data directory by hand.
+async function doResync() {
+  const button = document.getElementById('btn-resync');
+  button.disabled = true;
+  try {
+    const data = await api('GET', '/api/resync');
+    const removed = data.removed ? `，移除 ${data.removed} 条失效记录` : '';
+    toast(`索引已同步：扫描 ${data.scanned} 项${removed}`);
+    navigate(state.dir);
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Search
 // ---------------------------------------------------------------------------
@@ -511,6 +528,7 @@ async function openAdmin() {
 function wire() {
   document.getElementById('btn-mkdir').onclick = doMkdir;
   document.getElementById('btn-refresh').onclick = () => navigate(state.dir);
+  document.getElementById('btn-resync').onclick = doResync;
   document.getElementById('btn-search').onclick = doSearch;
   document.getElementById('btn-clear').onclick = clearSearch;
   document.getElementById('btn-admin').onclick = openAdmin;

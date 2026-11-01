@@ -17,6 +17,9 @@ void handle_rename(const AppContext& ctx, const httplib::Request& req,
                    httplib::Response& res);
 void handle_delete(const AppContext& ctx, const httplib::Request& req,
                    httplib::Response& res);
+// Rebuilds the file index from what is actually on disk.
+void handle_resync(const AppContext& ctx, const httplib::Request& req,
+                   httplib::Response& res);
 
 // Shared implementation used by both the business and the admin delete routes.
 void perform_delete(const AppContext& ctx, const httplib::Request& req,

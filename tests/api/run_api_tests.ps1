@@ -476,6 +476,39 @@ try {
         Assert-True (-not (Test-Path (Get-ServerFile "empty-dir"))) "directory still on disk"
     }
 
+    Check "IT-A12 resync indexes files copied in behind the server's back" {
+        $dropped = Get-ServerFile "dropped/late.txt"
+        New-Item -ItemType Directory -Path (Split-Path $dropped) -Force | Out-Null
+        [System.IO.File]::WriteAllText($dropped, "hand copied")
+
+        # Not visible before the rescan: the index only learns about it on demand.
+        $r = Invoke-Rest -Method GET -Path "/api/files?path=/dropped"
+        Assert-Ok $r 200
+        Assert-Eq (@((Get-Data $r).entries).Length) 0 "the file appeared without a rescan"
+
+        $r = Invoke-Rest -Method GET -Path "/api/resync"
+        Assert-Ok $r 200
+        $d = Get-Data $r
+        Assert-True ($d.scanned -ge 1) "scanned should count the new entries"
+
+        $r = Invoke-Rest -Method GET -Path "/api/files?path=/dropped"
+        Assert-Ok $r 200
+        $entries = @((Get-Data $r).entries)
+        Assert-Eq $entries.Length 1 "resync did not pick the file up"
+        Assert-Eq $entries[0].name "late.txt" "wrong entry"
+        Assert-Eq $entries[0].size 11 "size should come from disk"
+    }
+
+    Check "IT-A13 resync drops entries whose file is gone" {
+        Remove-Item (Split-Path (Get-ServerFile "dropped/late.txt")) -Recurse -Force
+        $r = Invoke-Rest -Method GET -Path "/api/resync"
+        Assert-Ok $r 200
+        Assert-True ((Get-Data $r).removed -ge 2) "expected the file and its directory to be dropped"
+
+        $r = Invoke-Rest -Method GET -Path "/api/files?path=/dropped"
+        Assert-Error $r 404 "DIR_NOT_FOUND"
+    }
+
     # ---------------------------------------------------------------- IT-B
     Write-Head "IT-B chunked upload"
 

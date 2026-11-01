@@ -248,4 +248,25 @@ void handle_download(const AppContext& ctx, const httplib::Request& req,
   });
 }
 
+void handle_resync(const AppContext& ctx, const httplib::Request& req,
+                   httplib::Response& res) {
+  handle(req, res, "resync", [&](RequestScope& scope) {
+    scope.set_path("/");
+    // It rebuilds the index, so no cache anywhere should hold the answer.
+    res.set_header("Cache-Control", "no-store");
+
+    // Walks data/files again and makes the index match it: new files are
+    // indexed, vanished ones are dropped.
+    const RescanStats stats = files_rescan(ctx.files_root);
+
+    Json data;
+    data["scanned"] = stats.scanned;
+    data["inserted"] = stats.inserted;
+    data["removed"] = stats.removed;
+    data["file_count"] = files_count();
+    scope.set_size(stats.scanned);
+    scope.ok(std::move(data));
+  });
+}
+
 }  // namespace fsrv

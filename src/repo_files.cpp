@@ -1,6 +1,7 @@
 #include "repo_files.h"
 
 #include <algorithm>
+#include <mutex>
 #include <unordered_set>
 
 #include "db.h"
@@ -12,6 +13,10 @@
 namespace fsrv {
 
 namespace {
+
+// A full rescan walks the whole tree; two of them running at once would only
+// fight over the same rows.
+std::mutex g_rescan_mutex;
 
 std::string base_name(const std::string& rel_path) {
   const size_t slash = rel_path.rfind('/');
@@ -204,6 +209,7 @@ int64_t files_count() {
 }
 
 RescanStats files_rescan(const fs::path& root) {
+  std::lock_guard<std::mutex> scan_lock(g_rescan_mutex);
   RescanStats stats;
 
   struct Entry {
@@ -274,13 +280,20 @@ ON CONFLICT(rel_path) DO UPDATE SET
   }
   stats.inserted = static_cast<int64_t>(entries.size());
 
-  // Drop rows whose backing file vanished.
+  // Drop rows whose backing file vanished. Every candidate is re-checked on
+  // disk first: an upload that landed between the directory walk and this pass
+  // has a row but no entry in `seen`, and must not be deleted.
   std::vector<std::string> stale;
   {
     Stmt st(conn(), "SELECT rel_path FROM files");
     while (st.step()) {
       std::string rel = st.col_text(0);
-      if (seen.find(rel) == seen.end()) stale.push_back(std::move(rel));
+      if (seen.find(rel) != seen.end()) continue;
+      bool is_dir = false;
+      int64_t size = 0;
+      int64_t mtime = 0;
+      if (stat_path(root / fs::u8path(rel), is_dir, size, mtime)) continue;
+      stale.push_back(std::move(rel));
     }
   }
   for (size_t i = 0; i < stale.size(); i += kBatch) {

@@ -109,11 +109,14 @@ cmake --build build --parallel -j
 | `POST` | `/api/mkdir` | 新建目录，body `{"path":"/a/b"}` |
 | `POST` | `/api/rename` | 重命名，body `{"from":"/a","to":"/b"}` |
 | `DELETE` | `/api/files?path=/a` | 删除文件或空目录 |
+| `GET` | `/api/resync` | 重新扫描 `files/`，让索引与磁盘对齐 |
 | `GET` | `/api/download?path=/a/b.bin` | 下载，支持 `Range` |
 | `POST` | `/api/upload/init` | 开始上传，body `{"path":"/a/b.bin","total_size":123}` |
 | `PUT` | `/api/upload/chunk` | 上传分片，头 `X-Session-Id`、`X-Chunk-Index`，body 为原始字节 |
 | `GET` | `/api/upload/session?id=` | 查询会话已接收分片 |
 | `POST` | `/api/upload/complete` | 合并分片，body `{"session_id":"..."}` |
+
+`/api/resync` 是唯一对全库生效的维护接口：它递归遍历 `files/`，把磁盘上新增的条目补进索引、把已消失的条目删掉，返回 `{"scanned","inserted","removed","file_count"}`。页面上的「同步索引」按钮就是它。用 `GET` 而不是 `POST`，是因为无 body 的 `POST` 会让 cpp-httplib 等到对端关闭连接才开始处理；响应带 `Cache-Control: no-store`。
 
 ### 管理接口（仅本机）
 
