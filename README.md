@@ -6,7 +6,7 @@
 
 ## 特性
 
-- **分片上传 + 断点续传**：默认 8MB 分片（可配置），每片一个独立 HTTP 请求、请求体为原始字节；上传中断后可通过会话恢复。
+- **分片上传 + 断点续传**：分片大小可配置（内置默认 8MB，随附的 `config.json` 使用 16MB），每片一个独立 HTTP 请求、请求体为原始字节；浏览器端同时保持 4 个分片在途，上传中断后可通过会话恢复。
 - **流式下载 + HTTP Range**：手动解析 `Range` 并返回 `206`/`Content-Range`，全程流式，不受文件大小影响内存占用。
 - **文件/目录管理**：列表、新建多级目录、重命名（文件与目录）、删除、覆盖上传（临时文件合并后原子替换）。
 - **全库文件名搜索**：基于 SQLite 索引的模糊匹配。
@@ -66,7 +66,7 @@ cmake --build build --parallel -j
   "port": 8080,
   "bind_address": "0.0.0.0",
   "data_root": "./data",
-  "chunk_size_mb": 8,
+  "chunk_size_mb": 16,
   "session_ttl_hours": 24,
   "audit_retention_days": 30,
   "audit_max_size_mb": 512,
@@ -79,7 +79,7 @@ cmake --build build --parallel -j
 | `port` | `8080` | 监听端口，1–65535 |
 | `bind_address` | `"0.0.0.0"` | 监听地址 |
 | `data_root` | `"./data"` | 数据目录，包含 `files/`、`tmp/`、`meta.db` |
-| `chunk_size_mb` | `8` | 分片大小，1–1024 |
+| `chunk_size_mb` | `8` | 分片大小，1–1024（随附配置用 16） |
 | `session_ttl_hours` | `24` | 上传会话保留时长 |
 | `audit_retention_days` | `30` | 审计日志保留天数，`0` 表示不按天数清理 |
 | `audit_max_size_mb` | `512` | 审计库容量上限，`0` 表示不按容量清理 |
@@ -130,7 +130,9 @@ cmake --build build --parallel -j
 3. 中断后 `GET /api/upload/session?id=` 取已接收索引，跳过已完成的分片续传
 4. `POST /api/upload/complete`
 
-分片写入 `tmp/<session_id>/NNNNNNNN.part`，完成时按序流式拼接、校验总字节数、`fsync`，再原子替换到目标路径。合并失败会保留会话与分片，可重试。
+分片写入 `tmp/<session_id>/NNNNNNNN.part`（先写唯一命名的临时文件再 `rename`），完成时按序流式拼接、校验总字节数、`fsync`，再原子替换到目标路径。合并失败会保留会话与分片，可重试。
+
+同一会话的多个分片可以并发上传：服务端对会话持共享锁写分片，只在合并/删除时取排他锁，位图更新用独立短锁串行化。浏览器端默认保持 4 个分片在途。
 
 ### 状态码
 

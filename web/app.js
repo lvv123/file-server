@@ -277,6 +277,12 @@ function clearSearch() {
 const sessionKey = (targetPath, file) =>
   `fsrv-session:${targetPath}:${file.size}:${file.lastModified}`;
 
+// How many chunk requests a single file keeps in flight. Each chunk is an
+// independent request and the server writes them concurrently, so overlapping
+// them hides the per-request latency (and the per-chunk fsync) instead of
+// leaving the connection idle between chunks.
+const UPLOAD_CONCURRENCY = 4;
+
 function chunkLength(fileSize, chunkSize, index) {
   return Math.min(chunkSize, fileSize - index * chunkSize);
 }
@@ -391,12 +397,36 @@ async function uploadOne(file, dir) {
     for (const index of received) doneBytes += chunkLength(file.size, chunkSize, index);
     ui.setProgress(doneBytes, file.size);
 
+    const pending = [];
     for (let index = 0; index < totalChunks; index += 1) {
-      if (received.has(index)) continue;
-      await sendChunk(file, sessionId, index, chunkSize);
-      doneBytes += chunkLength(file.size, chunkSize, index);
-      ui.setProgress(doneBytes, file.size);
+      if (!received.has(index)) pending.push(index);
     }
+
+    let nextSlot = 0;
+    let failure = null;
+    const workers = [];
+    const workerCount = Math.min(UPLOAD_CONCURRENCY, pending.length);
+    for (let w = 0; w < workerCount; w += 1) {
+      workers.push((async () => {
+        for (;;) {
+          if (failure) return;
+          const slot = nextSlot;
+          nextSlot += 1;
+          if (slot >= pending.length) return;
+          const index = pending[slot];
+          try {
+            await sendChunk(file, sessionId, index, chunkSize);
+          } catch (error) {
+            if (!failure) failure = error;
+            return;
+          }
+          doneBytes += chunkLength(file.size, chunkSize, index);
+          ui.setProgress(doneBytes, file.size);
+        }
+      })());
+    }
+    await Promise.all(workers);
+    if (failure) throw failure;
 
     ui.setProgress(doneBytes, file.size, '正在合并…');
     await api('POST', '/api/upload/complete', { session_id: sessionId });

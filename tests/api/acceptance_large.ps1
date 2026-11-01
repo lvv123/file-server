@@ -7,6 +7,7 @@
 #
 #   powershell -NoProfile -ExecutionPolicy Bypass -File tests\api\acceptance_large.ps1
 #   ... -SizeMB 512          # quick sanity run
+#   ... -Concurrency 1       # strictly sequential chunk requests
 #   ... -KeepData            # keep the temp data dir for inspection
 #
 [CmdletBinding()]
@@ -15,12 +16,15 @@ param(
     [int]$SizeMB = 10240,
     [int]$ChunkMB = 8,
     [int]$KillAfterPercent = 40,
+    [int]$Concurrency = 4,
     [switch]$KeepData
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.Net.Http
+
+if ($Concurrency -lt 1) { $Concurrency = 1 }
 
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 if (-not [System.IO.Path]::IsPathRooted($Exe)) {
@@ -127,6 +131,11 @@ $handler.AllowAutoRedirect = $false
 $client = New-Object System.Net.Http.HttpClient($handler)
 $client.Timeout = [System.Threading.Timeout]::InfiniteTimeSpan
 
+# HttpClient on .NET Framework goes through ServicePointManager; without this the
+# default connection limit (2) caps how many chunk requests can really overlap.
+[System.Net.ServicePointManager]::DefaultConnectionLimit = 32
+[System.Net.ServicePointManager]::Expect100Continue = $false
+
 function Post-Json([string]$path, $body) {
     $json = $body | ConvertTo-Json -Depth 6 -Compress
     $content = New-Object System.Net.Http.StringContent($json, [System.Text.Encoding]::UTF8, "application/json")
@@ -162,7 +171,10 @@ function Expected-Byte([int64]$index) {
     return [byte](((($index % 256) * 31) + 7) -band 0xFF)
 }
 
-function Send-Chunk([string]$sid, [int]$index) {
+# Chunk requests are started without waiting for the previous one, so that
+# $Concurrency requests are in flight at any time. `SendAsync` returns at once;
+# awaiting the oldest handle keeps the window full without spinning up threads.
+function Start-Chunk([string]$sid, [int]$index) {
     $offset = [int64]$index * $ChunkSize
     $len = [int][Math]::Min([int64]$ChunkSize, $TotalSize - $offset)
     $content = New-Object System.Net.Http.ByteArrayContent($chunkBuf, 0, $len)
@@ -170,12 +182,35 @@ function Send-Chunk([string]$sid, [int]$index) {
     $req.Headers.Add("X-Session-Id", $sid) | Out-Null
     $req.Headers.Add("X-Chunk-Index", [string]$index) | Out-Null
     $req.Content = $content
-    $resp = $client.SendAsync($req).Result
-    $text = $resp.Content.ReadAsStringAsync().Result
-    if (-not $resp.IsSuccessStatusCode) {
-        throw ("chunk {0} failed: {1} {2}" -f $index, [int]$resp.StatusCode, $text)
+    return [pscustomobject]@{
+        Index = $index
+        Request = $req
+        Task    = $client.SendAsync($req)
     }
-    $req.Dispose()
+}
+
+function Finish-Chunk($handle) {
+    $resp = $handle.Task.Result
+    $text = $resp.Content.ReadAsStringAsync().Result
+    $handle.Request.Dispose()
+    if (-not $resp.IsSuccessStatusCode) {
+        throw ("chunk {0} failed: {1} {2}" -f $handle.Index, [int]$resp.StatusCode, $text)
+    }
+}
+
+function Send-Range([string]$sid, [int]$from, [int]$to) {
+    $inflight = New-Object System.Collections.Generic.List[object]
+    for ($i = $from; $i -lt $to; $i++) {
+        $inflight.Add((Start-Chunk $sid $i))
+        if ($inflight.Count -ge $Concurrency) {
+            Finish-Chunk $inflight[0]
+            $inflight.RemoveAt(0)
+        }
+        if (($i + 1) % 100 -eq 0) {
+            Write-Host ("   {0}/{1} chunks  {2:N0} MiB" -f ($i + 1), $TotalChunks, ((($i + 1) * $ChunkSize) / 1MB))
+        }
+    }
+    foreach ($handle in $inflight) { Finish-Chunk $handle }
 }
 
 # ---------------------------------------------------------------- the run
@@ -198,12 +233,7 @@ try {
 
     Step ("uploading chunks 0..{0} then killing the server" -f ($killedAt - 1))
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    for ($i = 0; $i -lt $killedAt; $i++) {
-        Send-Chunk $sid $i
-        if (($i + 1) % 100 -eq 0) {
-            Write-Host ("   {0}/{1} chunks  {2:N0} MiB  {3:N1} s" -f ($i + 1), $TotalChunks, ((($i + 1) * $ChunkSize) / 1MB), $sw.Elapsed.TotalSeconds)
-        }
-    }
+    Send-Range $sid 0 $killedAt
     $sw.Stop()
     Write-Host ("   sent {0} chunks in {1:N1} s ({2:N0} MiB/s)" -f $killedAt, $sw.Elapsed.TotalSeconds, ($killedAt * $ChunkSize / 1MB / $sw.Elapsed.TotalSeconds))
 
@@ -232,12 +262,7 @@ try {
 
     Step ("resuming with chunks {0}..{1}" -f $killedAt, ($TotalChunks - 1))
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    for ($i = $killedAt; $i -lt $TotalChunks; $i++) {
-        Send-Chunk $sid $i
-        if (($i + 1) % 100 -eq 0) {
-            Write-Host ("   {0}/{1} chunks  {2:N1} s" -f ($i + 1), $TotalChunks, $sw.Elapsed.TotalSeconds)
-        }
-    }
+    Send-Range $sid $killedAt $TotalChunks
     $sw.Stop()
     Write-Host ("   resumed {0} chunks in {1:N1} s" -f ($TotalChunks - $killedAt), $sw.Elapsed.TotalSeconds)
 
@@ -279,6 +304,27 @@ try {
         Assert-True ($bytes.Length -eq 256) "expected 256 bytes"
         for ($k = 0; $k -lt 256; $k++) {
             if ($bytes[$k] -ne $template[$k]) { throw ("byte $k is $($bytes[$k]), expected $($template[$k])") }
+        }
+    }
+
+    Check "bytes sampled across the whole file match the generated pattern" {
+        # Head and tail only prove two chunks; with concurrent uploads a chunk
+        # written to the wrong offset would still leave both ends intact.
+        $samples = 32
+        for ($s = 0; $s -lt $samples; $s++) {
+            $off = [int64][Math]::Floor(($TotalSize - 256) * $s / ($samples - 1))
+            $req = New-Object System.Net.Http.HttpRequestMessage([System.Net.Http.HttpMethod]::Get, "$BaseUrl/api/download?path=$([uri]::EscapeDataString($TargetPath))")
+            $req.Headers.Add("Range", ("bytes={0}-{1}" -f $off, ($off + 255)))
+            $resp = $client.SendAsync($req).Result
+            Assert-True ([int]$resp.StatusCode -eq 206) ("expected 206 at offset {0}, got {1}" -f $off, [int]$resp.StatusCode)
+            $bytes = $resp.Content.ReadAsByteArrayAsync().Result
+            Assert-True ($bytes.Length -eq 256) ("expected 256 bytes at offset {0}, got {1}" -f $off, $bytes.Length)
+            for ($k = 0; $k -lt 256; $k++) {
+                $want = Expected-Byte ($off + $k)
+                if ($bytes[$k] -ne $want) {
+                    throw ("byte {0} is {1}, expected {2}" -f ($off + $k), $bytes[$k], $want)
+                }
+            }
         }
     }
 

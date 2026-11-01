@@ -5,6 +5,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -27,17 +28,31 @@ namespace {
 // memory (a few MiB) and lets the OS pipeline both directions.
 constexpr size_t kMergeBuffer = 4 * 1024 * 1024;
 
-std::mutex g_lock_map_mutex;
-std::unordered_map<std::string, std::shared_ptr<std::mutex>> g_lock_map;
+// Per-session synchronization.
+//
+// `io` is held *shared* while a chunk body is written, so several chunks of the
+// same session can be uploaded at the same time (they touch different part
+// files). It is held *exclusive* while the session is merged, deleted or
+// reclaimed, which must never overlap with a write still in flight.
+//
+// `meta` serializes read-modify-write cycles on the session row (the received
+// chunk bitmap). It is always acquired after `io`.
+struct SessionLocks {
+  std::shared_mutex io;
+  std::mutex meta;
+};
 
-std::shared_ptr<std::mutex> session_mutex(const std::string& id) {
+std::mutex g_lock_map_mutex;
+std::unordered_map<std::string, std::shared_ptr<SessionLocks>> g_lock_map;
+
+std::shared_ptr<SessionLocks> session_locks(const std::string& id) {
   std::lock_guard<std::mutex> lk(g_lock_map_mutex);
   auto& slot = g_lock_map[id];
-  if (!slot) slot = std::make_shared<std::mutex>();
+  if (!slot) slot = std::make_shared<SessionLocks>();
   return slot;
 }
 
-void forget_session_mutex(const std::string& id) {
+void forget_session_locks(const std::string& id) {
   std::lock_guard<std::mutex> lk(g_lock_map_mutex);
   g_lock_map.erase(id);
 }
@@ -50,6 +65,15 @@ std::string chunk_file_name(uint32_t index, const char* suffix) {
   char buf[32];
   std::snprintf(buf, sizeof(buf), "%08u%s", index, suffix);
   return buf;
+}
+
+// Chunk bodies land in a uniquely named temporary file and are renamed into
+// place, so a retry racing a slow original (or two clients uploading the same
+// index) cannot corrupt each other. `bitmap_from_disk` only looks at files named
+// exactly "<8 digits>.part", so these never show up as received chunks.
+std::string chunk_tmp_name(uint32_t index) {
+  const std::string id = uuid_v4();
+  return chunk_file_name(index, "") + "." + id.substr(0, 8) + ".tmp";
 }
 
 int64_t expected_chunk_size(const SessionRow& row, uint32_t index) {
@@ -201,33 +225,46 @@ UploadSessionInfo upload_init(const AppContext& ctx, std::string_view user_path,
 UploadSessionInfo upload_received(const AppContext& ctx,
                                   std::string_view session_id) {
   const std::string id(session_id);
-  auto mutex = session_mutex(id);
-  std::lock_guard<std::mutex> lk(*mutex);
+  auto locks = session_locks(id);
 
-  auto row = session_get(id);
-  if (!row) {
-    throw not_found("upload session not found", "SESSION_NOT_FOUND");
-  }
-  if (row->expires_at <= now_sec()) {
-    remove_tree_quietly(chunk_dir(ctx, id));
-    session_delete(id);
-    forget_session_mutex(id);
-    throw not_found("upload session has expired", "SESSION_EXPIRED");
+  {
+    std::shared_lock<std::shared_mutex> io_lock(locks->io);
+    auto row = session_get(id);
+    if (!row) {
+      throw not_found("upload session not found", "SESSION_NOT_FOUND");
+    }
+    if (row->expires_at > now_sec()) {
+      std::lock_guard<std::mutex> meta_lock(locks->meta);
+      ChunkBitmap bm = bitmap_from_disk(ctx, *row);
+      if (bm.blob() != row->bitmap) {
+        session_update_bitmap(id, bm.blob());
+      }
+      return to_info(*row, bm.indices());
+    }
   }
 
-  ChunkBitmap bm = bitmap_from_disk(ctx, *row);
-  if (bm.blob() != row->bitmap) {
-    session_update_bitmap(id, bm.blob());
+  // Expired: reclaim under the exclusive lock, so that no chunk write or merge
+  // can still be running while the directory disappears.
+  {
+    std::unique_lock<std::shared_mutex> io_lock(locks->io);
+    auto row = session_get(id);
+    if (row && row->expires_at <= now_sec()) {
+      remove_tree_quietly(chunk_dir(ctx, id));
+      session_delete(id);
+      forget_session_locks(id);
+    }
   }
-  return to_info(*row, bm.indices());
+  throw not_found("upload session has expired", "SESSION_EXPIRED");
 }
 
 ChunkResult upload_chunk(const AppContext& ctx, std::string_view session_id,
                          uint32_t index, BodyGate& body,
                          bool has_content_length, int64_t content_length) {
   const std::string id(session_id);
-  auto mutex = session_mutex(id);
-  std::lock_guard<std::mutex> lk(*mutex);
+  auto locks = session_locks(id);
+  // Shared: other chunks of this session may be written concurrently, but a
+  // merge or a delete cannot start while this one is in flight.
+  std::shared_lock<std::shared_mutex> io_lock(locks->io);
 
   auto row = session_get(id);
   if (!row) throw not_found("upload session not found", "SESSION_NOT_FOUND");
@@ -260,7 +297,7 @@ ChunkResult upload_chunk(const AppContext& ctx, std::string_view session_id,
 
   const fs::path dir = chunk_dir(ctx, id);
   const fs::path part = dir / fs::u8path(chunk_file_name(index, ".part"));
-  const fs::path part_tmp = dir / fs::u8path(chunk_file_name(index, ".part.tmp"));
+  const fs::path part_tmp = dir / fs::u8path(chunk_tmp_name(index));
 
   std::FILE* f = std::fopen(part_tmp.u8string().c_str(), "wb");
   if (!f) {
@@ -329,21 +366,29 @@ ChunkResult upload_chunk(const AppContext& ctx, std::string_view session_id,
     throw io_error_from("cannot commit chunk file", rename_ec);
   }
 
-  ChunkBitmap bm = ChunkBitmap::from_blob(row->bitmap, row->total_chunks);
-  bm.set(index);
-  session_update_bitmap(id, bm.blob());
-
-  ChunkResult result;
-  result.received = bm.count();
-  result.total_chunks = row->total_chunks;
-  result.complete = bm.full();
+  // Re-read the row: other chunks of this session may have updated the bitmap
+  // while this one was streaming, so the copy read at entry can be stale.
+  ChunkResult result{};
+  {
+    std::lock_guard<std::mutex> meta_lock(locks->meta);
+    auto fresh = session_get(id);
+    if (!fresh) throw not_found("upload session not found", "SESSION_NOT_FOUND");
+    ChunkBitmap bm = ChunkBitmap::from_blob(fresh->bitmap, fresh->total_chunks);
+    bm.set(index);
+    session_update_bitmap(id, bm.blob());
+    result.received = bm.count();
+    result.total_chunks = fresh->total_chunks;
+    result.complete = bm.full();
+  }
   return result;
 }
 
 void upload_complete(const AppContext& ctx, std::string_view session_id) {
   const std::string id(session_id);
-  auto mutex = session_mutex(id);
-  std::lock_guard<std::mutex> lk(*mutex);
+  auto locks = session_locks(id);
+  // Exclusive: a chunk write must not be in flight while the session is merged
+  // and then removed.
+  std::unique_lock<std::shared_mutex> io_lock(locks->io);
 
   auto row = session_get(id);
   if (!row) throw not_found("upload session not found", "SESSION_NOT_FOUND");
@@ -351,9 +396,13 @@ void upload_complete(const AppContext& ctx, std::string_view session_id) {
     throw not_found("upload session has expired", "SESSION_EXPIRED");
   }
 
-  ChunkBitmap bm = bitmap_from_disk(ctx, *row);
+  ChunkBitmap bm = [&] {
+    std::lock_guard<std::mutex> meta_lock(locks->meta);
+    ChunkBitmap scanned = bitmap_from_disk(ctx, *row);
+    if (!scanned.full()) session_update_bitmap(id, scanned.blob());
+    return scanned;
+  }();
   if (!bm.full()) {
-    session_update_bitmap(id, bm.blob());
     const auto missing = bm.missing();
     const std::string detail =
         std::to_string(missing.size()) + " chunk(s) are missing" +
@@ -435,20 +484,20 @@ void upload_complete(const AppContext& ctx, std::string_view session_id) {
 
   remove_tree_quietly(dir);
   session_delete(id);
-  forget_session_mutex(id);
+  forget_session_locks(id);
 }
 
 int64_t upload_cleanup_expired(const AppContext& ctx) {
   int64_t removed = 0;
   const auto expired = sessions_expired(now_sec());
   for (const auto& row : expired) {
-    auto mutex = session_mutex(row.id);
-    std::lock_guard<std::mutex> lk(*mutex);
+    auto locks = session_locks(row.id);
+    std::unique_lock<std::shared_mutex> io_lock(locks->io);
     auto current = session_get(row.id);
     if (current && current->expires_at > now_sec()) continue;
     remove_tree_quietly(chunk_dir(ctx, row.id));
     session_delete(row.id);
-    forget_session_mutex(row.id);
+    forget_session_locks(row.id);
     ++removed;
   }
   return removed;

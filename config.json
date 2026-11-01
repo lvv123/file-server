@@ -2,7 +2,7 @@
   "port": 8080,
   "bind_address": "0.0.0.0",
   "data_root": "./data",
-  "chunk_size_mb": 8,
+  "chunk_size_mb": 16,
   "session_ttl_hours": 24,
   "audit_retention_days": 30,
   "audit_max_size_mb": 512,
