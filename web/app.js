@@ -527,7 +527,6 @@ async function openAdmin() {
 
 function wire() {
   document.getElementById('btn-mkdir').onclick = doMkdir;
-  document.getElementById('btn-refresh').onclick = () => navigate(state.dir);
   document.getElementById('btn-resync').onclick = doResync;
   document.getElementById('btn-search').onclick = doSearch;
   document.getElementById('btn-clear').onclick = clearSearch;
