@@ -27,6 +27,8 @@ cmake --build build --config Release --parallel
 build\Release\file-server.exe -c config.json
 ```
 
+CRT 按静态方式链接，产出的 exe 不依赖 VC++ 运行库，可直接拷到其他 64 位 Windows 机器运行。
+
 **Linux（g++ ≥ 9 / clang ≥ 10）**
 
 ```sh
@@ -272,7 +274,7 @@ ctest --test-dir build --output-on-failure
 powershell -NoProfile -ExecutionPolicy Bypass -File tests/api/run_api_tests.ps1
 ```
 
-常用参数：`-Only <子串>` 只跑匹配的用例，`-KeepData` 保留临时数据目录，`-Port` 指定端口（默认自动选空闲端口），`-DiskFullDir <盘符>\` 打开磁盘写满用例。当前结果：62 项通过、1 项跳过（磁盘满，需要一块接近写满的卷），覆盖路径穿越矩阵、50 并发审计写入、管理接口非本机 403、协议边界等。
+常用参数：`-Only <子串>` 只跑匹配的用例，`-KeepData` 保留临时数据目录，`-Port` 指定端口（默认自动选空闲端口），`-DiskFullDir <盘符>\` 打开磁盘写满用例。当前结果：64 项通过、1 项跳过（磁盘满，需要一块接近写满的卷），覆盖路径穿越矩阵、50 并发审计写入、管理接口非本机 403、协议边界等。
 
 大文件验收（写入约 2 倍于文件大小的磁盘空间，默认 10 GiB，耗时数分钟）：
 

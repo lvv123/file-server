@@ -8,6 +8,9 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 if(MSVC)
   add_compile_definitions(_CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN _WINSOCK_DEPRECATED_NO_WARNINGS)
   add_compile_options(/utf-8 /W4 /permissive-)
+  # Link the CRT statically so the produced exe runs on a machine without the
+  # Visual C++ redistributable installed - the project ships as a single file.
+  set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 else()
   add_compile_options(-Wall -Wextra -Wno-unused-parameter)
 endif()
