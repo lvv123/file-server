@@ -218,3 +218,7 @@ python tools/gen_assets.py
 或配置 `-DFS_REGENERATE_ASSETS=ON` 在构建时自动执行（需要 Python）。
 
 架构约束：每个线程使用独立的 SQLite 连接并强制 `WAL`、`busy_timeout`、`synchronous=NORMAL`；所有用户路径经规范化与根目录包含性检查；分片与下载全程流式，不将完整文件或大分片读入内存。
+
+## 许可证
+
+[MIT](LICENSE)
