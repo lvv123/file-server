@@ -1,5 +1,9 @@
 # file-server
 
+[![release](https://img.shields.io/github/v/release/lvv123/file-server)](https://github.com/lvv123/file-server/releases)
+[![license](https://img.shields.io/github/license/lvv123/file-server)](LICENSE)
+[![platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-lightgrey)](#快速开始)
+
 ![文件列表界面](docs/screenshot.png)
 
 个人/小团队内网文件服务器：**单个可执行文件 + 一个 JSON 配置 + 一个数据目录**即可运行，面向百人以内、约 1 TB 存储、单文件约 10 GB 的场景。浏览器打开就是客户端，不需要额外部署前端。
@@ -15,9 +19,19 @@
 
 ## 快速开始
 
-仓库不提供预编译产物，需要自行构建。所有依赖已内置在 `third_party/`（cpp-httplib、nlohmann/json、SQLite amalgamation），构建过程**无需联网、无需包管理器**。
+**方式一：下载预编译版本（Windows x64）**
 
-前提：CMake ≥ 3.20、C++17 编译器。
+从 [Releases](https://github.com/lvv123/file-server/releases) 下载 `file-server-1.0.0-win64.zip`，解压后直接运行：
+
+```bat
+file-server.exe -c config.json
+```
+
+exe 静态链接了 CRT，不依赖 VC++ 运行库，可拷到其他 64 位 Windows 机器直接用。
+
+**方式二：从源码构建**
+
+所有依赖已内置在 `third_party/`（cpp-httplib、nlohmann/json、SQLite amalgamation），构建过程**无需联网、无需包管理器**。前提：CMake ≥ 3.20、C++17 编译器。
 
 **Windows（VS2022）**
 
