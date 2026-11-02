@@ -41,8 +41,6 @@ cmake --build build --config Release --parallel
 build\Release\file-server.exe -c config.json
 ```
 
-CRT 按静态方式链接，产出的 exe 不依赖 VC++ 运行库，可直接拷到其他 64 位 Windows 机器运行。
-
 **Linux（g++ ≥ 9 / clang ≥ 10）**
 
 ```sh
