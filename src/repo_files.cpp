@@ -7,6 +7,7 @@
 #include "db.h"
 #include "error.h"
 #include "fsops.h"
+#include "layout.h"
 #include "paths.h"
 #include "util.h"
 
@@ -37,6 +38,10 @@ std::string escape_like(const std::string& in) {
 
 void files_upsert(const std::string& rel_path, bool is_dir, int64_t size,
                   int64_t mtime) {
+  if (is_reserved_rel_path(rel_path)) {
+    throw forbidden("this path is reserved for server metadata",
+                    "RESERVED_PATH");
+  }
   Stmt st(conn(), R"sql(
 INSERT INTO files(rel_path, name, is_dir, size, mtime)
 VALUES(?, ?, ?, ?, ?)
@@ -53,11 +58,13 @@ ON CONFLICT(rel_path) DO UPDATE SET
 }
 
 void files_remove(const std::string& rel_path) {
+  if (is_reserved_rel_path(rel_path)) return;
   Stmt st(conn(), "DELETE FROM files WHERE rel_path = ?");
   st.bind(1, rel_path).run();
 }
 
 void files_remove_tree(const std::string& rel_path) {
+  if (is_reserved_rel_path(rel_path)) return;
   with_tx([&] {
     // NOTE: the same value is referenced three times, so it must be bound to
     // the same numbered parameter each time. Binding by position instead is
@@ -73,10 +80,14 @@ WHERE rel_path = ?1
 }
 
 std::optional<FileRow> files_get(const std::string& rel_path) {
-  Stmt st(conn(),
-          "SELECT id, rel_path, name, is_dir, size, mtime FROM files "
-          "WHERE rel_path = ?");
-  st.bind(1, rel_path);
+  if (is_reserved_rel_path(rel_path)) return std::nullopt;
+  Stmt st(conn(), R"sql(
+SELECT id, rel_path, name, is_dir, size, mtime FROM files
+WHERE rel_path = ?1
+  AND rel_path <> ?2
+  AND substr(rel_path, 1, length(?2) + 1) <> ?2 || '/'
+)sql");
+  st.bind(1, rel_path).bind(2, std::string(kMetaDirName));
   if (!st.step()) return std::nullopt;
   FileRow row;
   row.id = st.col_int64(0);
@@ -89,17 +100,21 @@ std::optional<FileRow> files_get(const std::string& rel_path) {
 }
 
 std::vector<FileRow> files_list(const std::string& rel_path) {
+  if (is_reserved_rel_path(rel_path)) return {};
   const std::string prefix = rel_path.empty() ? std::string() : rel_path + "/";
   const int64_t plen = static_cast<int64_t>(prefix.size());
 
   Stmt st(conn(), R"sql(
 SELECT id, rel_path, name, is_dir, size, mtime
 FROM files
-WHERE substr(rel_path, 1, ?) = ?
-  AND instr(substr(rel_path, ? + 1), '/') = 0
+WHERE substr(rel_path, 1, ?1) = ?2
+  AND instr(substr(rel_path, ?3 + 1), '/') = 0
+  AND rel_path <> ?4
+  AND substr(rel_path, 1, length(?4) + 1) <> ?4 || '/'
 ORDER BY is_dir DESC, name COLLATE NOCASE ASC
 )sql");
-  st.bind(1, plen).bind(2, prefix).bind(3, plen);
+  st.bind(1, plen).bind(2, prefix).bind(3, plen).bind(
+      4, std::string(kMetaDirName));
 
   std::vector<FileRow> rows;
   while (st.step()) {
@@ -115,7 +130,12 @@ ORDER BY is_dir DESC, name COLLATE NOCASE ASC
   return rows;
 }
 
-void files_rename_tree(const std::string& from, const std::string& to) {  const int64_t from_len = static_cast<int64_t>(from.size());
+void files_rename_tree(const std::string& from, const std::string& to) {
+  if (is_reserved_rel_path(from) || is_reserved_rel_path(to)) {
+    throw forbidden("this path is reserved for server metadata",
+                    "RESERVED_PATH");
+  }
+  const int64_t from_len = static_cast<int64_t>(from.size());
   with_tx([&] {
     Stmt st(conn(), R"sql(
 UPDATE files
@@ -137,6 +157,10 @@ WHERE rel_path = ?
 
 void files_make_dirs(const fs::path& root, const std::string& rel_dir) {
   if (rel_dir.empty()) return;
+  if (is_reserved_rel_path(rel_dir)) {
+    throw forbidden("this path is reserved for server metadata",
+                    "RESERVED_PATH");
+  }
   fs::path cur = root;
   std::string rel_so_far;
   size_t i = 0;
@@ -184,11 +208,16 @@ std::vector<SearchHit> files_search(const std::string& q, int limit,
   Stmt st(conn(), R"sql(
 SELECT rel_path, name, size, mtime
 FROM files
-WHERE is_dir = 0 AND name LIKE ? ESCAPE '\'
+WHERE is_dir = 0 AND name LIKE ?1 ESCAPE '\'
+  AND rel_path <> ?4
+  AND substr(rel_path, 1, length(?4) + 1) <> ?4 || '/'
 ORDER BY name COLLATE NOCASE ASC, rel_path ASC
-LIMIT ? OFFSET ?
+LIMIT ?2 OFFSET ?3
 )sql");
-  st.bind(1, pattern).bind(2, limit).bind(3, offset);
+  st.bind(1, pattern)
+      .bind(2, limit)
+      .bind(3, offset)
+      .bind(4, std::string(kMetaDirName));
 
   std::vector<SearchHit> hits;
   while (st.step()) {
@@ -203,7 +232,13 @@ LIMIT ? OFFSET ?
 }
 
 int64_t files_count() {
-  Stmt st(conn(), "SELECT COUNT(*) FROM files WHERE is_dir = 0");
+  Stmt st(conn(), R"sql(
+SELECT COUNT(*) FROM files
+WHERE is_dir = 0
+  AND rel_path <> ?1
+  AND substr(rel_path, 1, length(?1) + 1) <> ?1 || '/'
+)sql");
+  st.bind(1, std::string(kMetaDirName));
   if (!st.step()) return 0;
   return st.col_int64(0);
 }
@@ -211,6 +246,18 @@ int64_t files_count() {
 RescanStats files_rescan(const fs::path& root) {
   std::lock_guard<std::mutex> scan_lock(g_rescan_mutex);
   RescanStats stats;
+
+  // Rows written by an older version (or by a crash) must never leak the
+  // metadata directory into listings or search results.
+  {
+    Stmt st(conn(), R"sql(
+DELETE FROM files
+WHERE rel_path = ?1
+   OR substr(rel_path, 1, length(?1) + 1) = ?1 || '/'
+)sql");
+    st.bind(1, std::string(kMetaDirName));
+    st.run();
+  }
 
   struct Entry {
     std::string rel;
@@ -232,6 +279,25 @@ RescanStats files_rescan(const fs::path& root) {
     const fs::path& p = it->path();
     std::string rel = p.lexically_relative(root).generic_u8string();
     if (rel.empty() || rel.rfind("..", 0) == 0) continue;
+
+    // Never descend into the metadata directory: it contains the database and
+    // potentially gigabytes of upload chunks.
+    if (is_reserved_rel_path(rel)) {
+      it.disable_recursion_pending();
+      continue;
+    }
+
+    // Symlinks and junctions are intentionally not indexed. PathGuard would
+    // reject an escape at request time anyway, but hiding them here avoids
+    // advertising entries that can never be opened.
+    {
+      std::error_code sym_ec;
+      if (it->is_symlink(sym_ec)) {
+        std::error_code dir_ec;
+        if (it->is_directory(dir_ec)) it.disable_recursion_pending();
+        continue;
+      }
+    }
 
     bool is_dir = false;
     int64_t size = 0;

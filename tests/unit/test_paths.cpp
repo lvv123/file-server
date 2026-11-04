@@ -159,3 +159,38 @@ TEST_CASE(paths_make_requires_existing_directory) {
   testutil::write_bytes(dir / "file.txt", "x");
   CHECK_STATUS(PathGuard::make(dir / "file.txt"), 500);
 }
+
+TEST_CASE(paths_reserved_metadata_directory_is_rejected) {
+  testutil::TempDir dir{"fsrv-paths-reserved"};
+  const fs::path meta = dir / ".file-server";
+  fs::create_directories(meta / "tmp");
+  fs::create_directories(dir / "other");
+  const PathGuard guard = PathGuard::make(dir.path(), {meta});
+
+  CHECK_ERROR(guard.normalize("/.file-server"), 403, "RESERVED_PATH");
+  CHECK_ERROR(guard.normalize("/.file-server/meta.db"), 403, "RESERVED_PATH");
+  CHECK_ERROR(guard.normalize("/%2Efile-server/meta.db"), 403, "RESERVED_PATH");
+  CHECK_ERROR(guard.normalize("/.file-server%2Fmeta.db"), 403, "RESERVED_PATH");
+  CHECK_ERROR(guard.resolve("/.file-server/meta.db"), 403, "RESERVED_PATH");
+  CHECK_EQ(guard.normalize("/other/file.txt"), std::string("other/file.txt"));
+}
+
+TEST_CASE(paths_resolve_normalized_does_not_decode_percent_again) {
+  testutil::TempDir dir{"fsrv-paths-normalized"};
+  testutil::write_bytes(dir / "a%20b.txt", "x");
+  const PathGuard guard = PathGuard::make(dir.path());
+  const fs::path resolved = guard.resolve_normalized("a%20b.txt");
+  CHECK_EQ(resolved.filename().u8string(), std::string("a%20b.txt"));
+}
+
+TEST_CASE(paths_reserved_metadata_symlink_is_rejected) {
+  testutil::TempDir dir{"fsrv-paths-symlink"};
+  const fs::path meta = dir / ".file-server";
+  fs::create_directories(meta / "tmp");
+  std::error_code ec;
+  fs::create_directory_symlink(meta, dir / "alias", ec);
+  if (ec) return;  // creating symlinks may require privileges on Windows
+
+  const PathGuard guard = PathGuard::make(dir.path(), {meta});
+  CHECK_ERROR(guard.resolve("/alias/meta.db"), 403, "RESERVED_PATH");
+}

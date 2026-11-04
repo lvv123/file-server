@@ -2,6 +2,7 @@
 
 #include <fstream>
 #include <sstream>
+#include <system_error>
 
 #include "ext.h"
 #include "util.h"
@@ -91,10 +92,15 @@ Config load_config(const fs::path& path) {
   }
   if (!j.is_object()) throw ConfigError("configuration root must be an object");
 
+  if (j.contains("data_root")) {
+    throw ConfigError(
+        "config key 'data_root' is no longer supported; the served directory is "
+        "selected with --dir (default: the current directory)");
+  }
+
   Config cfg;
   cfg.port = require_int(j, "port", cfg.port);
   cfg.bind_address = require_string(j, "bind_address", cfg.bind_address);
-  cfg.data_root = require_string(j, "data_root", cfg.data_root);
   cfg.chunk_size_mb = require_int(j, "chunk_size_mb", cfg.chunk_size_mb);
   cfg.session_ttl_hours = require_int(j, "session_ttl_hours", cfg.session_ttl_hours);
   cfg.audit_retention_days =
@@ -133,9 +139,62 @@ Config load_config(const fs::path& path) {
   return cfg;
 }
 
+Config load_config_or_default(const fs::path& path) {
+  std::error_code ec;
+  const bool exists = fs::exists(path, ec);
+  if (ec) {
+    throw ConfigError("cannot inspect configuration file: " + path.u8string() +
+                      ": " + ec.message());
+  }
+  if (!exists) return Config{};
+  return load_config(path);
+}
+
+void write_default_config(const fs::path& path) {
+  const Config cfg;
+
+  Json j;
+  j["port"] = cfg.port;
+  j["bind_address"] = cfg.bind_address;
+  j["chunk_size_mb"] = cfg.chunk_size_mb;
+  j["session_ttl_hours"] = cfg.session_ttl_hours;
+  j["audit_retention_days"] = cfg.audit_retention_days;
+  j["audit_max_size_mb"] = cfg.audit_max_size_mb;
+  j["admin_allow_ips"] = cfg.admin_allow_ips;
+  j["thread_min"] = cfg.thread_min;
+  j["thread_max"] = cfg.thread_max;
+  j["thread_max_queue"] = cfg.thread_max_queue;
+  j["io_timeout_sec"] = cfg.io_timeout_sec;
+  j["max_json_body_bytes"] = cfg.max_json_body_bytes;
+  j["search_limit_default"] = cfg.search_limit_default;
+  j["search_limit_max"] = cfg.search_limit_max;
+
+  fs::path tmp = path;
+  tmp += ".tmp";
+  {
+    std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+    if (!out) {
+      throw ConfigError("cannot create configuration file: " + tmp.u8string());
+    }
+    out << j.dump(2) << '\n';
+    out.flush();
+    if (!out) {
+      throw ConfigError("cannot write configuration file: " + tmp.u8string());
+    }
+  }
+
+  std::error_code ec;
+  fs::rename(tmp, path, ec);
+  if (ec) {
+    std::error_code ignored;
+    fs::remove(tmp, ignored);
+    throw ConfigError("cannot install configuration file '" + path.u8string() +
+                      "': " + ec.message());
+  }
+}
+
 std::string validate_config(const Config& cfg) {
   if (cfg.port < 1 || cfg.port > 65535) return "port must be in 1..65535";
-  if (cfg.data_root.empty()) return "data_root must not be empty";
   if (cfg.chunk_size_mb < 1 || cfg.chunk_size_mb > 1024) {
     return "chunk_size_mb must be in 1..1024";
   }
@@ -164,12 +223,6 @@ std::string validate_config(const Config& cfg) {
     }
   }
   return {};
-}
-
-fs::path resolve_data_root(const Config& cfg) {
-  fs::path p = fs::u8path(cfg.data_root);
-  if (p.is_relative()) p = fs::absolute(p);
-  return p.lexically_normal();
 }
 
 }  // namespace fsrv

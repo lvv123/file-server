@@ -8,8 +8,9 @@ namespace fs = std::filesystem;
 using fsrv::Config;
 using fsrv::ConfigError;
 using fsrv::load_config;
-using fsrv::resolve_data_root;
+using fsrv::load_config_or_default;
 using fsrv::validate_config;
+using fsrv::write_default_config;
 
 namespace {
 
@@ -32,7 +33,6 @@ TEST_CASE(config_missing_keys_use_defaults) {
   const Config cfg = load_config(dir / "c.json");
   CHECK_EQ(cfg.port, 8080);
   CHECK_EQ(cfg.bind_address, std::string("0.0.0.0"));
-  CHECK_EQ(cfg.data_root, std::string("./data"));
   CHECK_EQ(cfg.chunk_size_mb, 8);
   CHECK_EQ(cfg.session_ttl_hours, 24);
   CHECK_EQ(cfg.audit_retention_days, 30);
@@ -50,11 +50,10 @@ TEST_CASE(config_partial_override) {
   testutil::TempDir dir{"fsrv-config"};
   testutil::write_bytes(dir / "c.json",
                         R"({"port": 9000, "chunk_size_mb": 4,
-                            "data_root": "./store", "session_ttl_hours": 2})");
+                            "session_ttl_hours": 2})");
   const Config cfg = load_config(dir / "c.json");
   CHECK_EQ(cfg.port, 9000);
   CHECK_EQ(cfg.chunk_size_mb, 4);
-  CHECK_EQ(cfg.data_root, std::string("./store"));
   CHECK_EQ(cfg.session_ttl_hours, 2);
   CHECK_EQ(cfg.bind_address, std::string("0.0.0.0"));
   CHECK_EQ(cfg.chunk_size_bytes(), static_cast<int64_t>(4 * 1024 * 1024));
@@ -66,7 +65,6 @@ TEST_CASE(config_full_document) {
   testutil::write_bytes(dir / "c.json", R"({
     "port": 8081,
     "bind_address": "127.0.0.1",
-    "data_root": "D:/data",
     "chunk_size_mb": 16,
     "session_ttl_hours": 48,
     "audit_retention_days": 7,
@@ -83,7 +81,6 @@ TEST_CASE(config_full_document) {
   const Config cfg = load_config(dir / "c.json");
   CHECK_EQ(cfg.port, 8081);
   CHECK_EQ(cfg.bind_address, std::string("127.0.0.1"));
-  CHECK_EQ(cfg.data_root, std::string("D:/data"));
   CHECK_EQ(cfg.chunk_size_mb, 16);
   CHECK_EQ(cfg.session_ttl_hours, 48);
   CHECK_EQ(cfg.audit_retention_days, 7);
@@ -110,6 +107,19 @@ TEST_CASE(config_empty_admin_list_falls_back_to_loopback) {
 TEST_CASE(config_missing_file_is_an_error) {
   testutil::TempDir dir{"fsrv-config"};
   CHECK(load_fails(dir / "does-not-exist.json"));
+}
+
+TEST_CASE(config_load_or_default_handles_a_missing_file) {
+  testutil::TempDir dir{"fsrv-config"};
+  const Config cfg = load_config_or_default(dir / "does-not-exist.json");
+  CHECK_EQ(cfg.port, 8080);
+  CHECK_EQ(cfg.chunk_size_mb, 8);
+}
+
+TEST_CASE(config_data_root_is_rejected) {
+  testutil::TempDir dir{"fsrv-config"};
+  testutil::write_bytes(dir / "c.json", R"({"data_root": "./data"})");
+  CHECK(load_fails(dir / "c.json"));
 }
 
 TEST_CASE(config_malformed_json_is_an_error) {
@@ -180,17 +190,14 @@ TEST_CASE(config_validate_reports_clear_messages) {
   CHECK(!validate_config(cfg).empty());
 }
 
-TEST_CASE(config_resolve_data_root) {
-  Config cfg;
-  cfg.data_root = "./store";
-  const fs::path resolved = resolve_data_root(cfg);
-  CHECK(resolved.is_absolute());
-  CHECK_EQ(resolved.filename().u8string(), std::string("store"));
-
-  cfg.data_root = "a/../b";
-  CHECK_EQ(resolve_data_root(cfg).filename().u8string(), std::string("b"));
-
-  const fs::path absolute = testutil::fs::absolute(testutil::fs::path("x"));
-  cfg.data_root = absolute.u8string();
-  CHECK_EQ(resolve_data_root(cfg), absolute);
+TEST_CASE(config_default_file_round_trips) {
+  testutil::TempDir dir{"fsrv-config"};
+  const fs::path path = dir / "nested" / "config.json";
+  fs::create_directories(path.parent_path());
+  write_default_config(path);
+  CHECK(fs::exists(path));
+  const Config cfg = load_config(path);
+  CHECK_EQ(cfg.port, 8080);
+  CHECK_EQ(cfg.chunk_size_mb, 8);
+  CHECK_EQ(cfg.admin_allow_ips.size(), static_cast<size_t>(1));
 }

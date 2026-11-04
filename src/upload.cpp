@@ -136,10 +136,10 @@ ChunkBitmap bitmap_from_disk(const AppContext& ctx, const SessionRow& row) {
   return bm;
 }
 
-// Creates `rel_dir` below the files root, indexing every level it creates.
+// Creates `rel_dir` below the served root, indexing every level it creates.
 void ensure_dirs(const AppContext& ctx, const std::string& rel_dir) {
   if (rel_dir.empty()) return;
-  files_make_dirs(ctx.files_root, rel_dir);
+  files_make_dirs(ctx.serve_root, rel_dir);
 }
 
 void remove_tree_quietly(const fs::path& p) {
@@ -479,7 +479,9 @@ void upload_complete(const AppContext& ctx, std::string_view session_id) {
 
   const fs::path dir = chunk_dir(ctx, id);
   const fs::path merged = dir / fs::u8path("merged.bin");
-  const fs::path target = ctx.files_root / fs::u8path(row->target_rel_path);
+  // The path came from upload_init, but the database is not a trust boundary:
+  // re-check it before replacing a file in the served root.
+  const fs::path target = ctx.paths.resolve_normalized(row->target_rel_path);
 
   const uint64_t available = free_bytes(ctx.tmp_root);
   if (available > 0 && available < static_cast<uint64_t>(row->total_size)) {

@@ -134,7 +134,7 @@ void handle_mkdir(const AppContext& ctx, const httplib::Request& req,
       return;
     }
 
-    files_make_dirs(ctx.files_root, rel);
+    files_make_dirs(ctx.serve_root, rel);
 
     Json data;
     data["path"] = "/" + rel;
@@ -257,7 +257,7 @@ void handle_resync(const AppContext& ctx, const httplib::Request& req,
 
     // Walks data/files again and makes the index match it: new files are
     // indexed, vanished ones are dropped.
-    const RescanStats stats = files_rescan(ctx.files_root);
+    const RescanStats stats = files_rescan(ctx.serve_root);
 
     Json data;
     data["scanned"] = stats.scanned;

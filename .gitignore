@@ -10,6 +10,7 @@
 
 # runtime data and logs
 /data/
+/.file-server/
 *.log
 
 # local scratch

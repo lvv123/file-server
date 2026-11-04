@@ -63,16 +63,16 @@ struct UploadFixture {
   fsrv::AppContext ctx;
 
   UploadFixture() {
-    const fs::path files = dir / "files";
-    const fs::path tmp = dir / "tmp";
-    fs::create_directories(files);
+    const fs::path serve = dir / "files";
+    const fs::path meta = serve / ".file-server";
+    const fs::path tmp = meta / "tmp";
     fs::create_directories(tmp);
     fsrv::db_init(dir / "meta.db");
-    ctx.data_root = dir.path();
-    ctx.files_root = files;
+    ctx.serve_root = serve;
+    ctx.meta_root = meta;
     ctx.tmp_root = tmp;
     ctx.db_path = dir / "meta.db";
-    ctx.paths = fsrv::PathGuard::make(files);
+    ctx.paths = fsrv::PathGuard::make(serve, {meta});
   }
 
   ~UploadFixture() { fsrv::db_close_current_thread(); }
@@ -113,6 +113,14 @@ struct UploadFixture {
 };
 
 }  // namespace
+
+TEST_CASE(upload_init_rejects_the_metadata_directory) {
+  UploadFixture f;
+  CHECK_ERROR(fsrv::upload_init(f.ctx, "/.file-server/evil.bin", 10), 403,
+              "RESERVED_PATH");
+  CHECK_ERROR(fsrv::upload_init(f.ctx, "/.file-server/tmp/evil.bin", 10), 403,
+              "RESERVED_PATH");
+}
 
 TEST_CASE(upload_chunk_streams_into_the_part_file) {
   UploadFixture f;
@@ -271,7 +279,7 @@ TEST_CASE(upload_complete_accepts_a_zero_byte_session) {
 
   fsrv::upload_complete(f.ctx, row.id);
 
-  const fs::path target = f.ctx.files_root / "empty.bin";
+  const fs::path target = f.ctx.serve_root / "empty.bin";
   REQUIRE(fs::exists(target));
   CHECK_EQ(fs::file_size(target), static_cast<uintmax_t>(0));
   CHECK(!fsrv::session_get(row.id).has_value());
@@ -291,7 +299,7 @@ TEST_CASE(upload_complete_merges_chunks_into_the_target) {
 
   fsrv::upload_complete(f.ctx, row.id);
 
-  const fs::path target = f.ctx.files_root / "dir" / "merged.bin";
+  const fs::path target = f.ctx.serve_root / "dir" / "merged.bin";
   REQUIRE(fs::exists(target));
   CHECK_EQ(testutil::read_bytes(target), std::string("abcdefghij"));
   CHECK(!fsrv::session_get(row.id).has_value());

@@ -34,6 +34,9 @@ endif()
 set(CORE_SOURCES
   src/util.cpp
   src/config.cpp
+  src/cli.cpp
+  src/layout.cpp
+  src/instance_lock.cpp
   src/paths.cpp
   src/fsops.cpp
   src/db.cpp

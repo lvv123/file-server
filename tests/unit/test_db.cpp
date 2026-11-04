@@ -303,6 +303,45 @@ TEST_CASE(files_rescan_picks_up_size_changes) {
   CHECK_EQ(fsrv::files_get("grow.bin")->size, static_cast<int64_t>(5000));
 }
 
+TEST_CASE(files_rescan_skips_the_metadata_directory) {
+  DbFixture f;
+  const fs::path root = f.dir / "root";
+  const fs::path meta = root / ".file-server";
+  fs::create_directories(meta / "tmp");
+  testutil::write_bytes(root / "visible.txt", "ok");
+  testutil::write_bytes(meta / "meta.db", "database");
+  testutil::write_bytes(meta / "tmp" / "00000000.part", "chunk");
+
+  // Simulate a row left behind by an older version.
+  {
+    fsrv::Stmt st(fsrv::conn(),
+                  "INSERT INTO files(rel_path, name, is_dir, size, mtime) "
+                  "VALUES('.file-server/meta.db', 'meta.db', 0, 8, 0)");
+    st.run();
+  }
+
+  fsrv::files_rescan(root);
+
+  {
+    fsrv::Stmt st(fsrv::conn(),
+                  "SELECT COUNT(*) FROM files WHERE rel_path = '.file-server' "
+                  "OR substr(rel_path, 1, 13) = '.file-server/'");
+    REQUIRE(st.step());
+    CHECK_EQ(st.col_int64(0), static_cast<int64_t>(0));
+  }
+
+  CHECK(!fsrv::files_get(".file-server/meta.db").has_value());
+  CHECK_ERROR(fsrv::files_upsert(".file-server/evil.bin", false, 1, 0), 403,
+              "RESERVED_PATH");
+  CHECK_ERROR(fsrv::files_make_dirs(root, ".file-server/evil"), 403,
+              "RESERVED_PATH");
+  CHECK_EQ(fsrv::files_count(), static_cast<int64_t>(1));
+  const auto root_rows = fsrv::files_list("");
+  REQUIRE(root_rows.size() == static_cast<size_t>(1));
+  CHECK_EQ(root_rows[0].name, std::string("visible.txt"));
+  CHECK(fsrv::files_search("meta", 10, 0).empty());
+}
+
 TEST_CASE(sessions_crud) {
   DbFixture f;
   const int64_t now = fsrv::now_sec();

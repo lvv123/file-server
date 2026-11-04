@@ -11,7 +11,6 @@ namespace fsrv {
 struct Config {
   int port = 8080;
   std::string bind_address = "0.0.0.0";
-  std::string data_root = "./data";
 
   int chunk_size_mb = 8;
   int session_ttl_hours = 24;
@@ -47,11 +46,16 @@ struct ConfigError : std::runtime_error {
 // back to the defaults above. Throws ConfigError on invalid content.
 Config load_config(const fs::path& path);
 
+// Like load_config(), but returns the built-in defaults when the file does not
+// exist. Invalid content is still an error.
+Config load_config_or_default(const fs::path& path);
+
+// Writes a documented default configuration. Used only when the default
+// location (<serve-root>/.file-server/config.json) does not exist yet.
+void write_default_config(const fs::path& path);
+
 // Validates a config and returns a human readable error message, or an empty
 // string when the config is acceptable.
 std::string validate_config(const Config& cfg);
-
-// Resolves the data root to an absolute, normalised path.
-fs::path resolve_data_root(const Config& cfg);
 
 }  // namespace fsrv

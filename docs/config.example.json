@@ -1,0 +1,16 @@
+{
+  "port": 8080,
+  "bind_address": "0.0.0.0",
+  "chunk_size_mb": 8,
+  "session_ttl_hours": 24,
+  "audit_retention_days": 30,
+  "audit_max_size_mb": 512,
+  "admin_allow_ips": ["127.0.0.1"],
+  "thread_min": 16,
+  "thread_max": 32,
+  "thread_max_queue": 64,
+  "io_timeout_sec": 300,
+  "max_json_body_bytes": 1048576,
+  "search_limit_default": 200,
+  "search_limit_max": 1000
+}

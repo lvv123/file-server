@@ -244,7 +244,7 @@ function Start-ApiServer {
     $stderr = Join-Path $script:WorkDir "server.err.log"
     $stdout = Join-Path $script:WorkDir "server.out.log"
     $proc = Start-Process -FilePath $script:Exe `
-        -ArgumentList @("--config", $script:ConfigPath) `
+        -ArgumentList $script:ServerArgs `
         -PassThru -WindowStyle Hidden `
         -RedirectStandardError $stderr -RedirectStandardOutput $stdout
 
@@ -300,29 +300,27 @@ $script:Port = $Port
 $script:Base = "http://127.0.0.1:$Port"
 
 $script:WorkDir = Join-Path ([System.IO.Path]::GetTempPath()) ("fsrv-api-" + [guid]::NewGuid().ToString("N").Substring(0, 8))
-$dataDir = Join-Path $script:WorkDir "data"
-$filesDir = Join-Path $dataDir "files"
+$dataDir = Join-Path $script:WorkDir "share"
 New-Item -ItemType Directory -Path $dataDir -Force | Out-Null
+$filesDir = $dataDir
+$script:ConfigPath = Join-Path $dataDir ".file-server\config.json"
 
-$script:ConfigPath = Join-Path $script:WorkDir "config.json"
-$config = [ordered]@{
-    port                 = $Port
-    bind_address         = "0.0.0.0"
-    data_root            = $dataDir
-    chunk_size_mb        = 1
-    session_ttl_hours    = 24
-    audit_retention_days = 30
-    audit_max_size_mb    = 64
-    admin_allow_ips      = @("127.0.0.1")
-}
-($config | ConvertTo-Json -Depth 5) | Set-Content -Path $script:ConfigPath -Encoding UTF8
+# Exercise the command-line path: no --config, no config file shipped. The
+# server must create .file-server/config.json itself.
+$script:ServerArgs = @(
+    "--dir", $dataDir,
+    "--port", [string]$Port,
+    "--bind-address", "0.0.0.0",
+    "--chunk-size-mb", "1",
+    "--audit-max-size-mb", "64"
+)
 
 $script:Client = New-ApiClient
 $server = $null
 
 Write-Host "server   : $Exe"
 Write-Host "port     : $Port"
-Write-Host "data dir : $dataDir"
+Write-Host "serve dir: $dataDir"
 
 # --------------------------------------------------------------------------
 # fixtures
@@ -386,6 +384,15 @@ try {
 
     # ---------------------------------------------------------------- IT-A
     Write-Head "IT-A file and directory management"
+
+    Check "IT-A0 startup created the hidden metadata layout" {
+        Assert-True (Test-Path (Join-Path $dataDir ".file-server")) "metadata directory missing"
+        Assert-True (Test-Path (Join-Path $dataDir ".file-server\config.json")) "config.json missing"
+        Assert-True (Test-Path (Join-Path $dataDir ".file-server\meta.db")) "meta.db missing"
+        Assert-True (Test-Path (Join-Path $dataDir ".file-server\tmp")) "tmp directory missing"
+        Assert-True (-not (Test-Path (Join-Path $dataDir "files"))) "legacy files/ directory was created"
+        Assert-True ((Get-Content $script:ConfigPath -Raw) -notmatch "data_root") "generated config still contains data_root"
+    }
 
     Check "IT-A1 list root returns an entries array" {
         $r = Invoke-Rest -Method GET -Path "/api/files?path=/"
@@ -622,7 +629,7 @@ try {
     Check "IT-B12 init with a traversing target is rejected with 403" {
         $r = Invoke-Rest -Method POST -Path "/api/upload/init" -Body @{ path = "/../escape.bin"; total_size = 10 }
         Assert-Error $r 403 "PATH_TRAVERSAL"
-        Assert-True (-not (Test-Path (Join-Path $dataDir "..\escape.bin"))) "escape.bin leaked outside the data root"
+        Assert-True (-not (Test-Path (Join-Path $dataDir "..\escape.bin"))) "escape.bin leaked outside the served root"
     }
 
     Check "IT-B13 init with a negative size returns 400" {
@@ -794,7 +801,31 @@ try {
 
     Check "IT-F4 nothing escaped the data root" {
         $escaped = Get-ChildItem -Path (Join-Path $dataDir "..") -Filter "*.bin" -ErrorAction SilentlyContinue
-        Assert-True ($null -eq $escaped) "files leaked outside files/"
+        Assert-True ($null -eq $escaped) "files leaked outside the served root"
+    }
+
+    Check "IT-F5 the metadata directory is hidden from listings and search" {
+        $r = Invoke-Rest -Method GET -Path "/api/files?path=/"
+        Assert-Ok $r 200
+        $names = @((Get-Data $r).entries) | ForEach-Object { $_.name }
+        Assert-True ($names -notcontains ".file-server") "metadata directory is listed"
+        $r = Invoke-Rest -Method GET -Path "/api/search?q=meta"
+        Assert-Ok $r 200
+        $paths = @((Get-Data $r).results) | ForEach-Object { $_.path }
+        Assert-True (-not ($paths | Where-Object { $_ -like "/.file-server/*" })) "metadata leaked into search"
+    }
+
+    Check "IT-F6 every metadata path is refused with 403" {
+        $r = Invoke-Rest -Method GET -Path "/api/files?path=/.file-server"
+        Assert-Error $r 403 "RESERVED_PATH"
+        $r = Invoke-Rest -Method GET -Path "/api/download?path=/.file-server/meta.db"
+        Assert-Error $r 403 "RESERVED_PATH"
+        $r = Invoke-Rest -Method DELETE -Path "/api/files?path=/.file-server/meta.db"
+        Assert-Error $r 403 "RESERVED_PATH"
+        $r = Invoke-Rest -Method POST -Path "/api/mkdir" -Body @{ path = "/.file-server/nested" }
+        Assert-Error $r 403 "RESERVED_PATH"
+        $r = Invoke-Rest -Method POST -Path "/api/upload/init" -Body @{ path = "/.file-server/evil.bin"; total_size = 1 }
+        Assert-Error $r 403 "RESERVED_PATH"
     }
 
     # ---------------------------------------------------------------- IT-G

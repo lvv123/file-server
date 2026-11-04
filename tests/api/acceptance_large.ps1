@@ -59,7 +59,7 @@ function Assert-True($cond, [string]$message) {
 
 $WorkDir = Join-Path $env:TEMP ("fsrv-accept-" + [guid]::NewGuid().ToString("N").Substring(0, 8))
 New-Item -ItemType Directory -Path $WorkDir -Force | Out-Null
-$DataRoot = Join-Path $WorkDir "data"
+$DataRoot = Join-Path $WorkDir "share"
 New-Item -ItemType Directory -Path $DataRoot -Force | Out-Null
 
 function Get-FreePort {
@@ -73,25 +73,19 @@ function Get-FreePort {
 $Port = Get-FreePort
 $BaseUrl = "http://127.0.0.1:$Port"
 
-$configPath = Join-Path $WorkDir "config.json"
-$config = [ordered]@{
-    port                 = $Port
-    bind_address         = "127.0.0.1"
-    data_root            = $DataRoot
-    chunk_size_mb        = $ChunkMB
-    session_ttl_hours    = 24
-    audit_retention_days = 30
-    audit_max_size_mb    = 512
-    admin_allow_ips      = @("127.0.0.1")
-}
-$config | ConvertTo-Json -Depth 4 | Set-Content -Path $configPath -Encoding UTF8
+$script:ServerArgs = @(
+    "--dir", $DataRoot,
+    "--port", [string]$Port,
+    "--bind-address", "127.0.0.1",
+    "--chunk-size-mb", [string]$ChunkMB
+)
 
 $script:proc = $null
 $script:stdoutLog = Join-Path $WorkDir "stdout.log"
 $script:stderrLog = Join-Path $WorkDir "stderr.log"
 
 function Start-Server {
-    $script:proc = Start-Process -FilePath $Exe -ArgumentList @("--config", $configPath) `
+    $script:proc = Start-Process -FilePath $Exe -ArgumentList $script:ServerArgs `
         -PassThru -RedirectStandardOutput $script:stdoutLog -RedirectStandardError $script:stderrLog
     $deadline = (Get-Date).AddSeconds(60)
     while ((Get-Date) -lt $deadline) {
@@ -220,7 +214,7 @@ $sid = $null
 $killedAt = [int][Math]::Floor($TotalChunks * $KillAfterPercent / 100)
 
 try {
-    Step "starting server on port $Port (data: $DataRoot)"
+    Step "starting server on port $Port (serve: $DataRoot)"
     Start-Server
 
     Step ("init upload: {0} MiB in {1} chunks of {2} MiB" -f $SizeMB, $TotalChunks, $ChunkMB)
@@ -329,7 +323,7 @@ try {
     }
 
     Check "the chunk directory was cleaned up" {
-        $tmpSession = Join-Path (Join-Path $DataRoot "tmp") $sid
+        $tmpSession = Join-Path (Join-Path (Join-Path $DataRoot ".file-server") "tmp") $sid
         Assert-True (-not (Test-Path $tmpSession)) "tmp session directory still exists"
     }
 

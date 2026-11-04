@@ -37,12 +37,15 @@ void handle_admin_status(const AppContext& ctx, const httplib::Request& req,
     scope.set_path("/");
 
     const int64_t now = now_sec();
-    const uint64_t total = total_bytes(ctx.data_root);
-    const uint64_t free = free_bytes(ctx.data_root);
+    const uint64_t total = total_bytes(ctx.serve_root);
+    const uint64_t free = free_bytes(ctx.serve_root);
 
     Json data;
-    data["data_root"] = ctx.data_root.u8string();
-    data["files_root"] = ctx.files_root.u8string();
+    data["serve_root"] = ctx.serve_root.u8string();
+    data["metadata_root"] = ctx.meta_root.u8string();
+    data["tmp_root"] = ctx.tmp_root.u8string();
+    data["database"] = ctx.db_path.u8string();
+    data["config"] = ctx.config_path.u8string();
     data["disk"] = Json{{"total", total},
                         {"free", free},
                         {"used", total > free ? total - free : 0},
@@ -54,7 +57,7 @@ void handle_admin_status(const AppContext& ctx, const httplib::Request& req,
     data["audit_total"] = audit_count();
     data["uptime_seconds"] = ctx.started_at > 0 ? now - ctx.started_at : 0;
     data["chunk_size_mb"] = ctx.cfg.chunk_size_mb;
-    data["version"] = "1.1.0";
+    data["version"] = "2.0.0";
     scope.ok(std::move(data));
   });
 }
