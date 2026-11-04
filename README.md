@@ -6,27 +6,47 @@
 
 ![文件列表界面](docs/screenshot.png)
 
-个人/小团队内网文件服务器：**单个可执行文件 + 一个 JSON 配置 + 一个数据目录**即可运行，面向百人以内、约 1 TB 存储、单文件约 10 GB 的场景。浏览器打开就是客户端，不需要额外部署前端。
+个人/小团队内网文件服务器：**单个可执行文件，服务一个目录**。默认服务当前工作目录，用法接近 `python -m http.server 8007`；数据库、上传临时文件和配置都收进目录下的隐藏文件夹 `.file-server/`，业务目录保持干净。
 
-- 分片上传 + 断点续传，浏览器端保持 4 个分片并发（本机实测 10 GiB 续传约 1.3 GB/s）
+- 分片上传 + 断点续传，浏览器端保持 4 个分片并发
 - 流式下载 + HTTP Range，内存占用与文件大小无关
 - SQLite 索引的文件名搜索、全量审计日志、仅本机可访问的管理后台
 - 手机、平板浏览器可直接使用，窄屏下自动切换为卡片式布局
 
 > [!WARNING]
 > 本项目**没有用户认证，也不提供 HTTPS**，默认监听 `0.0.0.0:8080`。
-> 它只适合部署在可信内网（家庭 / 办公室局域网）。**请勿暴露到公网**，也不要在不可信网络上运行。
+> 它只适合部署在可信内网（家庭 / 办公室局域网）。**请勿暴露到公网**。
+> 服务目录里的所有文件（包括源码、`.env`、`.git`）都可能被下载、修改或删除，请只把需要共享的目录作为服务目录。
 > 若确需公网访问，请在反向代理层自行加上认证与 TLS。
+
+## v2.0.0 主要变化
+
+- 目录布局改为「服务目录 + 隐藏的 `.file-server/`」，不再创建或使用 `data/files`。
+- 默认服务当前工作目录，`file-server.exe 8007` 即可启动；也可用 `-d D:\share` 指定目录。
+- 端口、监听地址、分片大小、上传会话、审计、线程、超时、搜索限制等参数都可通过命令行覆盖。
+- 配置文件默认位于 `<服务目录>/.file-server/config.json`，首次运行自动生成。
+- `.file-server` 对 Web 端完全隐藏，直接访问返回 `403 RESERVED_PATH`。
+
+从 v1 升级时，`data_root` 配置键已移除；旧的 `data/files` 内容需要移动到新的服务目录，或用 `-d <旧数据目录>/files` 直接服务旧文件，详见下文「v1 迁移」。
 
 ## 快速开始
 
 **方式一：下载预编译版本（Windows x64）**
 
-从 [Releases](https://github.com/lvv123/file-server/releases) 下载 `file-server-1.1.0-win64.zip`，解压后直接运行：
+从 [Releases](https://github.com/lvv123/file-server/releases) 下载 `file-server-2.0.0-win64.zip`，解压后直接运行：
 
 ```bat
-file-server.exe -c config.json
+file-server.exe
 ```
+
+它会把**当前目录**作为服务目录，并在其中创建 `.file-server/`。也可以指定目录和端口：
+
+```bat
+file-server.exe 8007
+file-server.exe -d D:\share 8007
+```
+
+然后浏览器打开 <http://127.0.0.1:8080/>（或你指定的端口）。
 
 exe 静态链接了 CRT，不依赖 VC++ 运行库，可拷到其他 64 位 Windows 机器直接用。
 
@@ -39,7 +59,7 @@ exe 静态链接了 CRT，不依赖 VC++ 运行库，可拷到其他 64 位 Wind
 ```bat
 cmake -S . -B build -G "Visual Studio 17 2022" -A x64
 cmake --build build --config Release --parallel
-build\Release\file-server.exe -c config.json
+build\Release\file-server.exe -d D:\share 8007
 ```
 
 **Linux（g++ ≥ 9 / clang ≥ 10）**
@@ -47,76 +67,102 @@ build\Release\file-server.exe -c config.json
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --parallel
-./build/file-server -c config.json
+./build/file-server -d /srv/share 8007
 ```
-
-然后浏览器打开 <http://127.0.0.1:8080/>。首次运行会在 `data_root` 下自动创建 `files/`、`tmp/`、`meta.db`。
-
-## 特性
-
-- **分片上传 + 断点续传**：分片大小由服务端在 `init` 时下发（内置默认 8 MB，随附的 `config.json` 使用 16 MB）；每片一个独立 HTTP 请求，请求体是原始字节而非 `multipart/form-data`；同一会话的多个分片可并发上传。上传中断后按已接收分片续传。
-- **流式下载 + HTTP Range**：手动解析 `Range`，正确返回 `206` / `Content-Range` / `Accept-Ranges`；支持闭区间、开区间与后缀区间，多区间请求返回 `416`。全程 64 KB 分块读出，内存占用与文件大小无关。
-- **文件 / 目录管理**：列表、新建多级目录、重命名（文件与目录）、删除（文件与空目录）、覆盖上传（先合并到临时文件，再原子替换目标）。
-- **全库文件名搜索**：基于 SQLite 索引的模糊匹配（`%q%`），只搜文件名，不做内容全文检索。
-- **审计日志**：记录时间、客户端 IP、操作类型、路径、大小、结果、错误信息、耗时、User-Agent；成功与失败都记录，按天数和容量两条策略滚动清理。
-- **管理后台**：状态页（磁盘容量、文件数、活跃会话、审计条数）、审计查询、删除；**仅本机可访问**。
-- **移动端可用**：手机、平板浏览器直接打开即可使用；窄屏下文件列表与审计记录自动切换为卡片布局，按钮按触控尺寸放大，管理面板变为全屏。
-- **可靠性**：上传先写 `tmp/`，校验总字节数并 `fsync` 后原子移动到 `files/`；启动时校验 `tmp/` 与 `files/` 位于同一挂载点，不满足直接拒绝启动；进程被强杀后会话与分片仍在，重启可继续上传。
-
-明确不做：秒传 / 去重、限速、用户认证、全文搜索、HTTPS、WebSocket、回收站、CLI / SDK、文件系统实时监听（外部改动需重启或调用 `/api/resync`）。
 
 ## 运行
 
-```sh
-./file-server -c config.json
+```text
+file-server [PORT] [options]
 ```
 
 | 参数 | 说明 |
 | --- | --- |
-| `-c`, `--config <path>` | 配置文件路径，默认 `config.json` |
-| `--check-config` | 只校验配置并初始化数据目录，不启动服务 |
+| `PORT` | 位置参数形式的端口，等价于 `--port PORT` |
+| `-d`, `--dir`, `--directory <path>` | 服务目录，默认当前工作目录 |
+| `-p`, `--port <port>` | 监听端口，默认 `8080` |
+| `-b`, `--bind`, `--bind-address <addr>` | 监听地址，默认 `0.0.0.0`；只允许本机用 `127.0.0.1` |
+| `-c`, `--config <path>` | 配置文件，默认 `<dir>/.file-server/config.json` |
+| `--chunk-size-mb <n>` | 分片大小，默认 `8` |
+| `--session-ttl-hours <n>` | 上传会话保留时长，默认 `24` |
+| `--audit-retention-days <n>` | 审计日志保留天数，默认 `30`；`0` 表示不按天数清理 |
+| `--audit-max-size-mb <n>` | 审计库容量上限，默认 `512`；`0` 表示不按容量清理 |
+| `--admin-allow-ip <ip>` | 允许访问管理接口的 IP，可重复；一旦指定会替换配置文件中的列表 |
+| `--thread-min <n>` / `--thread-max <n>` / `--thread-max-queue <n>` | 工作线程配置 |
+| `--io-timeout-sec <n>` | 读写超时，默认 `300` |
+| `--max-json-body-bytes <n>` | JSON 请求体上限，默认 `1048576` |
+| `--search-limit-default <n>` / `--search-limit-max <n>` | 搜索分页限制 |
+| `--check-config` | 校验配置、打印最终生效的路径和参数，不创建任何文件 |
 | `-h`, `--help` | 显示帮助 |
 | `--version` | 显示版本 |
 
-退出码：`0` 正常退出，`1` 启动失败（配置以外的原因，如端口占用、`tmp/` 与 `files/` 跨挂载点），`2` 配置文件错误。
+优先级：**内置默认值 < `config.json` < 命令行参数**。
 
-> **关于 `data_root`**：相对路径是相对于**进程的当前工作目录**，不是配置文件所在目录。以服务方式运行时工作目录通常不是你以为的那个，建议直接写绝对路径，或用 systemd 的 `WorkingDirectory` / 计划任务的「起始于」显式指定。
+退出码：`0` 正常退出，`1` 启动失败（端口占用、目录不可写、跨卷等），`2` 参数或配置文件错误。
+
+### 目录布局
+
+```text
+D:\share\                         <- 服务目录（默认当前目录）
+├── .file-server\
+│   ├── config.json               <- 首次运行自动生成
+│   ├── meta.db                   <- SQLite：文件索引、上传会话、审计日志
+│   ├── meta.db-wal
+│   ├── meta.db-shm
+│   ├── server.lock               <- 单实例锁
+│   └── tmp\                      <- 上传中的分片
+│       └── <session-id>\*.part
+├── 现有文件...
+└── 现有目录...
+```
+
+- `.file-server/` 在 Web 端**永远不可见**：列表、搜索、下载、删除、重命名、新建目录、上传都会拒绝该路径，符号链接别名也会被拦截。
+- 根目录下的 `files/` 不再是特殊目录。它就是普通子目录，和你的其他文件一样被服务。
+- 同一目录只允许运行一个 `file-server` 实例；第二个实例会因 `server.lock` 启动失败。
+- `tmp/` 与业务文件位于同一磁盘卷，这是合并时原子替换的前提。`.file-server` 不允许是指向其他卷的符号链接/junction。
 
 ## 配置
 
-配置文件为 JSON，所有键都可选，缺失的键使用默认值。
+默认配置文件是 `<服务目录>/.file-server/config.json`。首次运行且该文件不存在时，程序会自动生成一份默认配置；显式用 `-c` 指定的文件不存在则报错，不会自动创建。
+
+所有键都可选，缺失的键使用默认值：
 
 ```json
 {
   "port": 8080,
   "bind_address": "0.0.0.0",
-  "data_root": "./data",
-  "chunk_size_mb": 16,
+  "chunk_size_mb": 8,
   "session_ttl_hours": 24,
   "audit_retention_days": 30,
   "audit_max_size_mb": 512,
-  "admin_allow_ips": ["127.0.0.1"]
+  "admin_allow_ips": ["127.0.0.1"],
+  "thread_min": 16,
+  "thread_max": 32,
+  "thread_max_queue": 64,
+  "io_timeout_sec": 300,
+  "max_json_body_bytes": 1048576,
+  "search_limit_default": 200,
+  "search_limit_max": 1000
 }
 ```
 
 | 键 | 默认值 | 说明 |
 | --- | --- | --- |
 | `port` | `8080` | 监听端口，1–65535 |
-| `bind_address` | `"0.0.0.0"` | 监听地址，改成 `127.0.0.1` 则只允许本机访问 |
-| `data_root` | `"./data"` | 数据目录，存放 `files/`、`tmp/`、`meta.db` |
-| `chunk_size_mb` | `8` | 分片大小，1–1024（随附配置用 16） |
-| `session_ttl_hours` | `24` | 上传会话保留时长，超时后分片被清理 |
+| `bind_address` | `"0.0.0.0"` | 监听地址 |
+| `chunk_size_mb` | `8` | 分片大小，1–1024 |
+| `session_ttl_hours` | `24` | 上传会话保留时长 |
 | `audit_retention_days` | `30` | 审计日志保留天数，`0` 表示不按天数清理 |
 | `audit_max_size_mb` | `512` | 审计库容量上限，`0` 表示不按容量清理 |
 | `admin_allow_ips` | `["127.0.0.1"]` | 允许访问管理接口的来源 IP |
+| `thread_min` / `thread_max` / `thread_max_queue` | `16` / `32` / `64` | 工作线程 |
+| `io_timeout_sec` | `300` | 读写超时 |
+| `max_json_body_bytes` | `1048576` | JSON 请求体上限 |
+| `search_limit_default` / `search_limit_max` | `200` / `1000` | 搜索分页限制 |
 
-高级键（同样可选）：`thread_min`(16)、`thread_max`(32)、`thread_max_queue`(64)、`io_timeout_sec`(300)、`max_json_body_bytes`(1048576)、`search_limit_default`(200)、`search_limit_max`(1000)。
+**v1 迁移**：`data_root` 键已移除，配置文件里出现它会直接报错。v1 的 `data/files` 内容需要移动到新的服务目录，或用 `-d <旧数据目录>/files` 直接服务旧文件；旧 `meta.db` 不复用，启动时会重新索引。
 
-规则与限制：
-
-- `tmp/` 与 `files/` 必须位于同一挂载点（同一磁盘卷），否则启动直接失败。这是原子替换的前提。
-- 管理接口按 **TCP 对端地址** 判定来源，不信任 `X-Forwarded-For`。经反向代理访问时管理接口会返回 `403`，应把 `admin_allow_ips` 配成代理主机地址。
-- 修改配置后需要重启进程生效。
+外部新增、删除或重命名的文件不会实时出现在列表和搜索中。启动时会全量扫描一次；运行期间可点击页面上的「同步索引」或调用 `GET /api/resync`。
 
 ## API
 
@@ -138,65 +184,29 @@ cmake --build build --parallel
 | `POST` | `/api/mkdir` | 新建目录，body `{"path":"/a/b"}` |
 | `POST` | `/api/rename` | 重命名，body `{"from":"/a","to":"/b"}` |
 | `DELETE` | `/api/files?path=/a` | 删除文件或空目录 |
-| `GET` | `/api/resync` | 重新扫描 `files/`，让索引与磁盘对齐 |
+| `GET` | `/api/resync` | 重新扫描服务目录，让索引与磁盘对齐 |
 | `GET` | `/api/download?path=/a/b.bin` | 下载，支持 `Range` |
 | `POST` | `/api/upload/init` | 开始上传，body `{"path":"/a/b.bin","total_size":123}` |
 | `PUT` | `/api/upload/chunk` | 上传分片，头 `X-Session-Id`、`X-Chunk-Index`，body 为原始字节 |
 | `GET` | `/api/upload/session?id=` | 查询会话已接收的分片索引 |
 | `POST` | `/api/upload/complete` | 合并分片并落盘，body `{"session_id":"..."}` |
 
-`/api/resync` 是幂等的维护接口：递归遍历 `files/`，把磁盘上新增的条目补进索引、把已消失的条目删掉，返回 `{"scanned","inserted","removed","file_count"}`。页面上的「同步索引」按钮就是它。用 `GET` 是为了让 `curl` 这类不带 body 的客户端也能直接调用（无 body 的 `POST` 会让底层框架等待对端关闭连接）。
+访问 `/.file-server` 及其子路径统一返回 `403 RESERVED_PATH`。
 
 ### 上传流程
 
 1. `POST /api/upload/init` → 返回 `{"session_id","chunk_size","total_chunks","expires_at"}`
-2. 重复 `PUT /api/upload/chunk`，`X-Chunk-Index` 从 `0` 开始，`Content-Length` 必须**精确等于**该片应有的字节数（前 `n-1` 片为 `chunk_size`，最后一片为余数）
+2. 重复 `PUT /api/upload/chunk`，`X-Chunk-Index` 从 `0` 开始，`Content-Length` 必须**精确等于**该片应有的字节数
 3. 中断后 `GET /api/upload/session?id=` 取已接收索引，跳过已完成的分片续传
 4. `POST /api/upload/complete` 合并写入目标路径
 
-用 `curl` 走一遍完整流程：
-
-```sh
-# 1) 初始化，拿到 session_id 与服务端分配的分片大小
-curl -s -X POST http://127.0.0.1:8080/api/upload/init \
-  -H 'Content-Type: application/json' \
-  -d '{"path":"/demo/big.bin","total_size":41943040}'
-# → {"ok":true,"data":{"session_id":"9b2f...","chunk_size":16777216,"total_chunks":3,...}}
-
-# 2) 按 chunk_size 切开，逐片上传（请求体是原始字节，不是 multipart）
-split -b 16777216 big.bin chunk-
-curl -s -X PUT http://127.0.0.1:8080/api/upload/chunk \
-  -H 'X-Session-Id: 9b2f...' -H 'X-Chunk-Index: 0' \
-  --data-binary @chunk-aa
-
-# 3) 合并落盘
-curl -s -X POST http://127.0.0.1:8080/api/upload/complete \
-  -H 'Content-Type: application/json' -d '{"session_id":"9b2f..."}'
-# → {"ok":true,"data":{"path":"/demo/big.bin","size":41943040}}
-```
-
-分片写入 `tmp/<session_id>/NNNNNNNN.part`（先写唯一命名的临时文件再 `rename`，重传与并发都安全）。完成时按索引顺序流式拼接、校验总字节数与声明一致、`fsync`，最后原子替换目标路径。合并失败会保留会话与分片，可重试。
-
-同一会话的多个分片可以并发上传：服务端对会话持共享锁写分片，只在合并/删除时取排他锁，位图更新用独立短锁串行化。浏览器端默认保持 4 个分片在途。
+分片写入 `.file-server/tmp/<session_id>/NNNNNNNN.part`。完成时按索引顺序流式拼接、校验总字节数与声明一致、`fsync`，最后原子替换目标路径。合并失败会保留会话与分片，可重试。
 
 零字节文件同样支持：`total_size` 填 `0`，服务端返回 `total_chunks: 0`，直接调用 `complete` 即可生成空文件。
 
 ### 下载与 Range
 
-```sh
-# 整文件
-curl -s -o out.bin 'http://127.0.0.1:8080/api/download?path=/demo/big.bin'
-
-# 只看响应头（含 Content-Range / Accept-Ranges）
-curl -sI -H 'Range: bytes=0-1023' \
-  'http://127.0.0.1:8080/api/download?path=/demo/big.bin'
-# HTTP/1.1 206 Partial Content
-# Accept-Ranges: bytes
-# Content-Range: bytes 0-1023/41943040
-# Content-Length: 1024
-```
-
-支持 `bytes=0-1023`（闭区间）、`bytes=1048576-`（到文件末尾）、`bytes=-1024`（最后 1024 字节）三种形式。多区间请求、起点越界、区间非法一律返回 `416` 并带 `Content-Range: bytes */<size>`。响应带 `Content-Disposition: attachment`，文件名按 RFC 5987 做 UTF-8 百分号编码。
+支持 `bytes=0-1023`（闭区间）、`bytes=1048576-`（到文件末尾）、`bytes=-1024`（最后 1024 字节）三种形式。多区间请求、起点越界、区间非法一律返回 `416` 并带 `Content-Range: bytes */<size>`。
 
 ### 管理接口（仅本机）
 
@@ -206,13 +216,15 @@ curl -sI -H 'Range: bytes=0-1023' \
 | `GET` | `/admin/audit?limit=&offset=` | 审计记录，`limit` 默认 50、上限 500 |
 | `DELETE` | `/admin/files?path=/a` | 删除文件或空目录 |
 
+管理接口按 **TCP 对端地址** 判定来源，不信任 `X-Forwarded-For`。经反向代理访问时管理接口会返回 `403`，应把 `admin_allow_ips` 配成代理主机地址。
+
 ### 状态码
 
 | 码 | 含义 |
 | --- | --- |
 | `200` / `206` | 成功 / 部分内容 |
 | `400` | 参数缺失或非法、JSON 错误、分片索引越界 |
-| `403` | 路径穿越、管理接口非本机 |
+| `403` | 路径穿越、访问 `.file-server`、管理接口非本机 |
 | `404` | 文件、目录或会话不存在 |
 | `409` | 目标已存在、目录非空、分片不齐 |
 | `411` | 缺少 `Content-Length` |
@@ -232,8 +244,8 @@ After=network.target
 
 [Service]
 Type=simple
-WorkingDirectory=/srv/file-server
-ExecStart=/srv/file-server/file-server -c /srv/file-server/config.json
+WorkingDirectory=/srv/share
+ExecStart=/srv/file-server/file-server -d /srv/share 8080
 Restart=on-failure
 
 [Install]
@@ -243,28 +255,21 @@ WantedBy=multi-user.target
 Windows 用计划任务（项目本身不是 Windows 服务）：
 
 ```bat
-schtasks /create /tn file-server /tr "\"C:\file-server\file-server.exe\" -c \"C:\file-server\config.json\"" ^
+schtasks /create /tn file-server /tr "\"C:\file-server\file-server.exe\" -d \"C:\share\" 8080" ^
   /sc onstart /ru SYSTEM /rl HIGHEST
 ```
 
 经 nginx 反向代理时注意两点：`client_max_body_size` 必须不小于 `chunk_size`，且建议 `proxy_request_buffering off`，否则 nginx 会把每个分片先缓冲到自己的磁盘上。
 
-## 数据目录
+## 数据与备份
 
-```
-data/
-├── files/      # 业务文件，直接映射真实磁盘目录
-├── tmp/        # 上传中的分片与会话临时文件（必须与 files/ 同挂载点）
-└── meta.db     # SQLite：files 索引、upload_sessions、audit_logs
-```
+`.file-server/meta.db` 中的 `files` 索引在每次启动时按磁盘实际内容校对，**损坏或丢失可以重建**：删掉 `meta.db` 重启，或启动后调用 `GET /api/resync` 即可恢复列表与搜索。审计日志也在 `meta.db` 里，删除会一起丢失。
 
-`files/` 下的内容就是用户可见的文件树，可以按需备份或迁移。`meta.db` 中的 `files` 索引在每次启动时按磁盘实际内容校对，**损坏或丢失可以重建**：删掉 `meta.db` 重启，或启动后调用 `GET /api/resync` 即可恢复列表与搜索。
-
-备份时停掉服务后直接复制整个 `data/` 目录即可；只想备份文件内容则复制 `files/`，索引可以靠重扫恢复（但审计日志在 `meta.db` 里，会一起丢失）。
+备份时停掉服务后直接复制整个服务目录即可；只想备份文件内容则复制业务文件，索引可以靠重扫恢复。
 
 ## 测试
 
-单元测试（零第三方依赖的自研断言框架，80 个用例 / 532 条断言）。测试目标默认参与构建，无需额外开关：
+单元测试（零第三方依赖的自研断言框架，118 个用例 / 680 条断言）：
 
 ```bat
 cmake -S . -B build -G "Visual Studio 17 2022" -A x64
@@ -282,13 +287,13 @@ cmake --build build --parallel
 ctest --test-dir build --output-on-failure
 ```
 
-接口 / 集成测试（会自行启动真实服务进程，使用临时数据目录，不碰你的 `data/`）：
+接口 / 集成测试（会自行启动真实服务进程，使用临时目录，不碰你的数据）：
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File tests/api/run_api_tests.ps1
 ```
 
-常用参数：`-Only <子串>` 只跑匹配的用例，`-KeepData` 保留临时数据目录，`-Port` 指定端口（默认自动选空闲端口），`-DiskFullDir <盘符>\` 打开磁盘写满用例。当前结果：64 项通过、1 项跳过（磁盘满，需要一块接近写满的卷），覆盖路径穿越矩阵、50 并发审计写入、管理接口非本机 403、协议边界等。
+常用参数：`-Only <子串>` 只跑匹配的用例，`-KeepData` 保留临时目录，`-Port` 指定端口（默认自动选空闲端口），`-DiskFullDir <盘符>\` 打开磁盘写满用例。当前结果：69 项通过、1 项跳过（磁盘满，需要一块接近写满的卷）。
 
 大文件验收（写入约 2 倍于文件大小的磁盘空间，默认 10 GiB，耗时数分钟）：
 
@@ -298,19 +303,21 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tests/api/acceptance_large.p
 powershell -NoProfile -ExecutionPolicy Bypass -File tests/api/acceptance_large.ps1 -SizeMB 64
 ```
 
-该脚本完整走一遍「上传 → 强杀进程 → 重启 → 查询会话 → 续传 → 合并 → 校验文件内容」，对应验收标准第 1 条。
+该脚本完整走一遍「上传 → 强杀进程 → 重启 → 查询会话 → 续传 → 合并 → 校验文件内容」。
 
 ## 开发
 
-```
+```text
 src/            服务端源码（C++17）
   main.cpp        入口、启动序列、维护线程
+  cli.cpp         命令行解析
+  layout.cpp      服务目录与 .file-server 布局
   server.cpp      路由注册
   handler_*.cpp   各接口实现
   repo_*.cpp      SQLite 数据访问
   upload.cpp      分片落盘与合并
   download.cpp    流式下载与 Range
-  paths.cpp       路径规范化与越界防护
+  paths.cpp       路径规范化、保留路径与越界防护
 web/            内嵌前端（原生 HTML/CSS/JS，无构建步骤）
 tests/unit/     单元测试
 tests/api/      接口测试脚本（PowerShell）
@@ -326,7 +333,7 @@ python tools/gen_assets.py
 
 或配置 `-DFS_REGENERATE_ASSETS=ON` 在构建时自动执行（需要 Python）。
 
-架构约束：每个线程使用独立的 SQLite 连接并强制 `WAL`、`busy_timeout`、`synchronous=NORMAL`；所有用户路径经规范化与根目录包含性检查；分片与下载全程流式，不把完整文件或大分片读入内存。
+架构约束：每个线程使用独立的 SQLite 连接并强制 `WAL`、`busy_timeout`、`synchronous=NORMAL`；所有用户路径经规范化、根目录包含性检查与 `.file-server` 保留路径检查；分片与下载全程流式，不把完整文件或大分片读入内存。
 
 浏览器要求：任何 2018 年之后的现代浏览器（用到 `fetch`、`localStorage`、`async/await`），不兼容 IE。
 
