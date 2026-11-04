@@ -11,6 +11,12 @@
 
 * { box-sizing: border-box; }
 
+html { -webkit-text-size-adjust: 100%; }
+
+/* Touch devices: no 300ms delay, no grey flash on tap. */
+button, .btn, a, .listing .name { touch-action: manipulation; }
+button, .btn, a { -webkit-tap-highlight-color: transparent; }
+
 body {
   margin: 0;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei",
@@ -129,10 +135,15 @@ main { padding: 0 20px 40px; }
 .listing td.num, .listing th.num { text-align: right; white-space: nowrap; }
 .listing td.ops { text-align: right; white-space: nowrap; }
 .listing td.ops .btn { margin-left: 4px; }
-.listing .name { display: flex; align-items: center; gap: 8px; cursor: pointer; }
-.listing .name .icon { width: 18px; text-align: center; }
-.listing .name:hover { color: var(--accent); }
+.listing .name { display: flex; align-items: center; gap: 8px; cursor: pointer; min-width: 0; }
+.listing .name .icon { width: 18px; text-align: center; flex: none; }
+.listing .name span:last-child { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+@media (hover: hover) {
+  .listing .name:hover { color: var(--accent); }
+}
 .listing .muted { color: var(--muted); }
+/* Keep the timestamp on one line; wrapping mid-date is hard to scan. */
+#browser .listing td.muted { white-space: nowrap; }
 
 .empty { padding: 30px; text-align: center; color: var(--muted); }
 
@@ -189,8 +200,158 @@ main { padding: 0 20px 40px; }
 }
 .toast.error { background: var(--danger); }
 
-@media (max-width: 640px) {
-  .topbar { flex-wrap: wrap; }
-  .searchbox { order: 3; width: 100%; }
-  .searchbox input { max-width: none; }
+/* --------------------------------------------------------------------------
+   Touch devices
+   -------------------------------------------------------------------------- */
+
+@media (pointer: coarse) {
+  .btn { min-height: 40px; padding: 8px 14px; }
+  .btn.small { min-height: 36px; padding: 8px 12px; font-size: 13px; }
+}
+
+.listing td.ops a.btn { color: var(--text); text-decoration: none; }
+
+/* --------------------------------------------------------------------------
+   Phones and small tablets: tables turn into cards, actions get full-width
+   tap targets, and nothing relies on hover.
+   -------------------------------------------------------------------------- */
+
+@media (max-width: 720px) {
+  body { font-size: 15px; }
+
+  .topbar {
+    flex-wrap: wrap;
+    gap: 10px;
+    padding: 10px 12px;
+    padding-top: calc(10px + env(safe-area-inset-top));
+  }
+  .brand { font-size: 15px; }
+  .searchbox { order: 3; flex: 1 1 100%; width: 100%; }
+  .searchbox input {
+    max-width: none;
+    font-size: 16px; /* anything smaller makes iOS zoom the page on focus */
+    padding: 10px 12px;
+    -webkit-appearance: none;
+    appearance: none;
+  }
+
+  main { padding: 0 12px calc(28px + env(safe-area-inset-bottom)); }
+
+  /* A deep path scrolls sideways instead of pushing the page wide. */
+  .crumbs {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    white-space: nowrap;
+    padding: 8px 12px;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+  .crumbs::-webkit-scrollbar { display: none; }
+
+  .toolbar { flex-wrap: wrap; gap: 8px; }
+  .toolbar .btn { flex: 1 1 auto; min-height: 44px; }
+
+  .upload-row .meta { gap: 8px; }
+  .upload-row .meta span:first-child { overflow-wrap: anywhere; }
+  .upload-row .meta span:last-child { flex: none; }
+
+  .listing { border: none; background: none; }
+  .listing thead { display: none; }
+  .listing tbody, .listing tr, .listing td { display: block; }
+  .listing tbody tr {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px 12px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 10px 12px;
+    margin-bottom: 8px;
+  }
+  .listing td { border: none; padding: 0; }
+  .listing td:nth-child(1) { flex: 1 1 100%; font-size: 15px; }
+  .listing td:nth-child(2),
+  .listing td:nth-child(3) { flex: 0 0 auto; font-size: 12px; color: var(--muted); }
+  .listing td.num { text-align: left; }
+  .listing td.ops {
+    flex: 1 1 100%;
+    display: flex;
+    gap: 8px;
+    margin-top: 6px;
+    text-align: left;
+    white-space: normal;
+  }
+  .listing td.ops .btn {
+    flex: 1 1 0;
+    margin: 0;
+    min-height: 40px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .listing td.empty { flex: 1 1 100%; text-align: center; padding: 18px 0; }
+
+  /* The admin panel becomes a full-screen sheet. */
+  .admin {
+    padding: 0;
+    align-items: stretch;
+    background: var(--bg);
+    overscroll-behavior: contain;
+  }
+  .admin-panel {
+    border: none;
+    border-radius: 0;
+    box-shadow: none;
+    max-width: none;
+    min-height: 100%;
+    padding: calc(12px + env(safe-area-inset-top)) 12px
+      calc(24px + env(safe-area-inset-bottom));
+  }
+  .admin-head h2 { font-size: 18px; }
+  .admin .cards { gap: 8px; margin: 12px 0; }
+  .admin .card { flex: 1 1 calc(50% - 4px); min-width: 0; padding: 10px 12px; }
+  .admin .card .value { font-size: 17px; }
+  .admin .table-wrap { overflow: visible; }
+
+  /* Audit rows become compact two-column cards; each value keeps its label. */
+  .admin .listing { border: none; background: none; }
+  .admin .listing tbody tr {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 2px 10px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--panel);
+    padding: 8px 10px;
+    margin-bottom: 8px;
+  }
+  .admin .listing td {
+    border: none;
+    padding: 0;
+    font-size: 13px;
+    flex: 1 1 calc(50% - 10px);
+    min-width: 0;
+    display: flex;
+    gap: 6px;
+  }
+  .admin .listing td::before {
+    content: attr(data-label);
+    flex: none;
+    min-width: 2.6em;
+    color: var(--muted);
+  }
+  /* Timestamp and path get a full row so neither has to wrap. */
+  .admin .listing td:nth-child(1),
+  .admin .listing td:nth-child(4) { flex: 1 1 100%; }
+  .admin .listing td.num { text-align: left; }
+
+  .toast {
+    bottom: calc(16px + env(safe-area-inset-bottom));
+    max-width: calc(100vw - 24px);
+  }
+}
+
+@media (max-width: 420px) {
+  .listing td:nth-child(1) { font-size: 14px; }
 }

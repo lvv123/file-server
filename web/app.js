@@ -481,6 +481,10 @@ function addCard(container, label, value) {
   container.appendChild(card);
 }
 
+// Column names, reused as inline labels when the audit table collapses into
+// cards on a narrow screen (see the max-width: 720px rules in style.css).
+const AUDIT_LABELS = ['时间', '来源', '操作', '路径', '结果', '耗时'];
+
 async function openAdmin() {
   try {
     const status = await api('GET', '/admin/status');
@@ -508,6 +512,7 @@ async function openAdmin() {
       for (let i = 0; i < cells.length; i += 1) {
         const td = document.createElement('td');
         td.textContent = cells[i] === null ? '' : cells[i];
+        td.dataset.label = AUDIT_LABELS[i];
         if (i === 5) td.className = 'num';
         if (i === 4) td.className = record.result === 'success' ? '' : 'muted';
         tr.appendChild(td);
@@ -515,10 +520,17 @@ async function openAdmin() {
       tbody.appendChild(tr);
     }
     document.getElementById('admin').hidden = false;
+    // Keeps the page behind the panel from scrolling on touch devices.
+    document.body.style.overflow = 'hidden';
   } catch (error) {
     toast(error.message, true);
     document.getElementById('admin').hidden = true;
   }
+}
+
+function closeAdmin() {
+  document.getElementById('admin').hidden = true;
+  document.body.style.overflow = '';
 }
 
 // ---------------------------------------------------------------------------
@@ -531,9 +543,7 @@ function wire() {
   document.getElementById('btn-search').onclick = doSearch;
   document.getElementById('btn-clear').onclick = clearSearch;
   document.getElementById('btn-admin').onclick = openAdmin;
-  document.getElementById('btn-admin-close').onclick = () => {
-    document.getElementById('admin').hidden = true;
-  };
+  document.getElementById('btn-admin-close').onclick = closeAdmin;
   document.getElementById('q').addEventListener('keydown', (event) => {
     if (event.key === 'Enter') doSearch();
   });
