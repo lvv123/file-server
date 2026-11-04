@@ -2,6 +2,8 @@
 
 > 写于 2026-11-04，对应提交 `016010c`。本文档用于在新会话中继续开发前恢复上下文。
 
+> **状态更新（2026-11-04）**：待办 1、待办 2 已完成。`upload_chunk` 现在由 `PartFile` RAII 守卫管理临时文件，并拆成 `validate_chunk_request` / `stream_to_part` / `commit_part`；新增与框架无关的 `BodySource` 接口，`BodyGate` 在传输层实现它，`tests/unit/test_upload.cpp` 补了 14 个用例。当前 94 个单测 / 589 条断言、66 个接口测试（1 跳过）全部通过，4 GiB 大文件验收通过。以下内容保留为历史记录。
+
 ## 一、当前状态
 
 | 项 | 状态 |

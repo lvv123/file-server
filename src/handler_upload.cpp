@@ -1,5 +1,6 @@
 #include <cstdint>
 
+#include "body_gate.h"
 #include "error.h"
 #include "handler_routes.h"
 #include "upload.h"

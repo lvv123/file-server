@@ -1,6 +1,7 @@
 #include "upload.h"
 
 #include <algorithm>
+#include <cerrno>
 #include <cstdio>
 #include <limits>
 #include <memory>
@@ -8,6 +9,7 @@
 #include <shared_mutex>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 
 #include "bitmap.h"
 #include "db.h"
@@ -146,6 +148,162 @@ void remove_tree_quietly(const fs::path& p) {
   if (ec) log_warn("cannot remove '" + p.u8string() + "': " + ec.message());
 }
 
+// Owns the temporary file of one chunk write. Cleanup is automatic: the
+// destructor closes the stream before removing the file (Windows refuses to
+// delete a file that is still open) and removes it unless the chunk was
+// committed. Keeping this out of the control flow means a newly added error
+// path cannot leak a descriptor or leave a *.tmp file behind.
+class PartFile {
+ public:
+  explicit PartFile(fs::path tmp) : tmp_(std::move(tmp)) {}
+  ~PartFile() {
+    close();
+    if (!committed_) {
+      std::error_code ec;
+      fs::remove(tmp_, ec);
+    }
+  }
+
+  PartFile(const PartFile&) = delete;
+  PartFile& operator=(const PartFile&) = delete;
+
+  bool open() {
+    f_ = std::fopen(tmp_.u8string().c_str(), "wb");
+    return f_ != nullptr;
+  }
+
+  std::FILE* get() const { return f_; }
+
+  void close() {
+    if (!f_) return;
+    std::FILE* f = f_;
+    f_ = nullptr;
+    std::fclose(f);
+  }
+
+  void commit() { committed_ = true; }
+
+  const fs::path& path() const { return tmp_; }
+
+ private:
+  std::FILE* f_ = nullptr;
+  fs::path tmp_;
+  bool committed_ = false;
+};
+
+struct ChunkPlan {
+  uint32_t index = 0;
+  int64_t expected = 0;
+  fs::path part;
+  fs::path part_tmp;
+};
+
+// Validates everything that can be checked before the body is touched. Body
+// handling on the reject paths follows the keep-alive invariant: a declared
+// body is drained, a body without a declared length is abandoned (draining it
+// would block until the peer closes the connection).
+ChunkPlan validate_chunk_request(const AppContext& ctx, const std::string& id,
+                                 uint32_t index, BodySource& body,
+                                 bool has_content_length,
+                                 int64_t content_length) {
+  auto row = session_get(id);
+  if (!row) {
+    forget_session_locks(id);
+    throw not_found("upload session not found", "SESSION_NOT_FOUND");
+  }
+  if (row->expires_at <= now_sec()) {
+    throw not_found("upload session has expired", "SESSION_EXPIRED");
+  }
+  if (index >= row->total_chunks) {
+    throw bad_request("chunk index out of range", "CHUNK_INDEX_OUT_OF_RANGE");
+  }
+
+  const int64_t expected = expected_chunk_size(*row, index);
+  if (!has_content_length) {
+    body.abandon();
+    throw length_required("chunk uploads require a Content-Length header");
+  }
+  if (content_length != expected) {
+    body.drain();
+    throw too_large("chunk size does not match the declared size (expected " +
+                        std::to_string(expected) + " bytes)",
+                    "CHUNK_SIZE_MISMATCH");
+  }
+
+  ChunkPlan plan;
+  plan.index = index;
+  plan.expected = expected;
+  const fs::path dir = chunk_dir(ctx, id);
+  plan.part = dir / fs::u8path(chunk_file_name(index, ".part"));
+  plan.part_tmp = dir / fs::u8path(chunk_tmp_name(index));
+  return plan;
+}
+
+// Copies the body into `part`, verifies the byte count and flushes it to stable
+// storage. The temp file stays under PartFile's ownership.
+void stream_to_part(BodySource& body, PartFile& part, uint32_t index,
+                    int64_t expected) {
+  int64_t received_total = 0;
+  int64_t written = 0;
+  bool body_too_large = false;
+  bool io_failed = false;
+  int io_errno = 0;
+
+  const bool consumed = body.read([&](const char* data, size_t len) {
+    received_total += static_cast<int64_t>(len);
+    if (!body_too_large && !io_failed) {
+      if (received_total > expected) {
+        body_too_large = true;
+      } else if (std::fwrite(data, 1, len, part.get()) != len) {
+        // Save errno before any close (including the one in ~PartFile) can
+        // overwrite it.
+        io_failed = true;
+        io_errno = errno;
+      } else {
+        written += static_cast<int64_t>(len);
+      }
+    }
+    return true;
+  });
+
+  if (io_failed) throw io_error("cannot write chunk data", io_errno);
+  if (!consumed) {
+    throw bad_request("request body could not be read", "BODY_READ_FAILED");
+  }
+  if (body_too_large || written != expected) {
+    throw too_large("chunk size does not match the declared size (expected " +
+                        std::to_string(expected) + " bytes, received " +
+                        std::to_string(written) + ")",
+                    "CHUNK_SIZE_MISMATCH");
+  }
+
+  sync_stream(part.get(), "chunk " + std::to_string(index));
+  part.close();
+}
+
+// Publishes the temporary file and records the chunk in the bitmap.
+ChunkResult commit_part(const std::string& id, const ChunkPlan& plan,
+                        SessionLocks& locks, PartFile& part) {
+  std::error_code ec;
+  fs::rename(part.path(), plan.part, ec);
+  if (ec) throw io_error_from("cannot commit chunk file", ec);
+  part.commit();
+
+  // Re-read the row: other chunks of this session may have updated the bitmap
+  // while this one was streaming, so the copy read at entry can be stale.
+  ChunkResult result{};
+  std::lock_guard<std::mutex> meta_lock(locks.meta);
+  auto fresh = session_get(id);
+  if (!fresh) throw not_found("upload session not found", "SESSION_NOT_FOUND");
+  ChunkBitmap bm = ChunkBitmap::from_blob(fresh->bitmap, fresh->total_chunks);
+  bm.set(plan.index);
+  session_update_bitmap(id, bm.blob());
+  result.received = bm.count();
+  result.total_chunks = fresh->total_chunks;
+  result.complete = bm.full();
+  return result;
+}
+
 }  // namespace
 
 UploadSessionInfo upload_init(const AppContext& ctx, std::string_view user_path,
@@ -264,7 +422,7 @@ UploadSessionInfo upload_received(const AppContext& ctx,
 }
 
 ChunkResult upload_chunk(const AppContext& ctx, std::string_view session_id,
-                         uint32_t index, BodyGate& body,
+                         uint32_t index, BodySource& body,
                          bool has_content_length, int64_t content_length) {
   const std::string id(session_id);
   auto locks = session_locks(id);
@@ -272,124 +430,20 @@ ChunkResult upload_chunk(const AppContext& ctx, std::string_view session_id,
   // merge or a delete cannot start while this one is in flight.
   std::shared_lock<std::shared_mutex> io_lock(locks->io);
 
-  auto row = session_get(id);
-  if (!row) {
-    forget_session_locks(id);
-    throw not_found("upload session not found", "SESSION_NOT_FOUND");
-  }
-  if (row->expires_at <= now_sec()) {
-    throw not_found("upload session has expired", "SESSION_EXPIRED");
-  }
-  if (index >= row->total_chunks) {
-    throw bad_request("chunk index out of range", "CHUNK_INDEX_OUT_OF_RANGE");
-  }
-
-  const int64_t expected = expected_chunk_size(*row, index);
-
   // The body must always be consumed, otherwise the connection would be left
   // with unread bytes and the next request on this keep-alive connection would
-  // be garbage. BodyGate makes the drain idempotent, so the caller's own
+  // be garbage. BodySource makes the drain idempotent, so the caller's own
   // error-path drain cannot block on an already-exhausted body.
-  // A body without a declared length cannot be skipped: httplib reads it until
-  // the peer closes the connection, so draining here would hang the worker. The
-  // request carries no bytes at all in this case, so there is nothing to skip.
-  if (!has_content_length) {
-    body.abandon();
-    throw length_required("chunk uploads require a Content-Length header");
-  }
-  if (content_length != expected) {
-    body.drain();
-    throw too_large("chunk size does not match the declared size (expected " +
-                        std::to_string(expected) + " bytes)",
-                    "CHUNK_SIZE_MISMATCH");
-  }
+  const ChunkPlan plan = validate_chunk_request(
+      ctx, id, index, body, has_content_length, content_length);
 
-  const fs::path dir = chunk_dir(ctx, id);
-  const fs::path part = dir / fs::u8path(chunk_file_name(index, ".part"));
-  const fs::path part_tmp = dir / fs::u8path(chunk_tmp_name(index));
-
-  std::FILE* f = std::fopen(part_tmp.u8string().c_str(), "wb");
-  if (!f) {
+  PartFile part(plan.part_tmp);
+  if (!part.open()) {
     throw io_error("cannot create chunk file", errno);
   }
 
-  int64_t received_total = 0;
-  int64_t written = 0;
-  bool body_too_large = false;
-  bool io_failed = false;
-  int io_errno = 0;
-
-  const bool consumed = body.read([&](const char* data, size_t len) {
-    received_total += static_cast<int64_t>(len);
-    if (!body_too_large && !io_failed) {
-      if (received_total > expected) {
-        body_too_large = true;
-      } else if (std::fwrite(data, 1, len, f) != len) {
-        io_failed = true;
-        io_errno = errno;
-      } else {
-        written += static_cast<int64_t>(len);
-      }
-    }
-    return true;
-  });
-
-  if (io_failed) {
-    std::fclose(f);
-    std::error_code ec;
-    fs::remove(part_tmp, ec);
-    throw io_error("cannot write chunk data", io_errno);
-  }
-  if (!consumed) {
-    std::fclose(f);
-    std::error_code ec;
-    fs::remove(part_tmp, ec);
-    throw bad_request("request body could not be read", "BODY_READ_FAILED");
-  }
-  if (body_too_large || written != expected) {
-    std::fclose(f);
-    std::error_code ec;
-    fs::remove(part_tmp, ec);
-    throw too_large("chunk size does not match the declared size (expected " +
-                        std::to_string(expected) + " bytes, received " +
-                        std::to_string(written) + ")",
-                    "CHUNK_SIZE_MISMATCH");
-  }
-
-  try {
-    sync_stream(f, "chunk " + std::to_string(index));
-  } catch (...) {
-    std::fclose(f);
-    std::error_code ec;
-    fs::remove(part_tmp, ec);
-    throw;
-  }
-  std::fclose(f);
-
-  std::error_code ec;
-  fs::rename(part_tmp, part, ec);
-  if (ec) {
-    const std::error_code rename_ec = ec;
-    std::error_code cleanup_ec;
-    fs::remove(part_tmp, cleanup_ec);
-    throw io_error_from("cannot commit chunk file", rename_ec);
-  }
-
-  // Re-read the row: other chunks of this session may have updated the bitmap
-  // while this one was streaming, so the copy read at entry can be stale.
-  ChunkResult result{};
-  {
-    std::lock_guard<std::mutex> meta_lock(locks->meta);
-    auto fresh = session_get(id);
-    if (!fresh) throw not_found("upload session not found", "SESSION_NOT_FOUND");
-    ChunkBitmap bm = ChunkBitmap::from_blob(fresh->bitmap, fresh->total_chunks);
-    bm.set(index);
-    session_update_bitmap(id, bm.blob());
-    result.received = bm.count();
-    result.total_chunks = fresh->total_chunks;
-    result.complete = bm.full();
-  }
-  return result;
+  stream_to_part(body, part, index, plan.expected);
+  return commit_part(id, plan, *locks, part);
 }
 
 void upload_complete(const AppContext& ctx, std::string_view session_id) {

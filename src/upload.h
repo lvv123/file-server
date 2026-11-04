@@ -1,14 +1,33 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <string_view>
 #include <vector>
 
 #include "app_context.h"
-#include "body_gate.h"
 
 namespace fsrv {
+
+// Framework independent view of a request body. The transport layer implements
+// it (see BodyGate) so the upload logic can be unit tested without constructing
+// a cpp-httplib ContentReader.
+struct BodySource {
+  // Streams the body into `sink`. Returns false when the body could not be
+  // read. Only one call per request is meaningful.
+  virtual bool read(const std::function<bool(const char*, size_t)>& sink) = 0;
+
+  // Discards whatever part of the body has not been read yet.
+  virtual void drain() = 0;
+
+  // Marks the body as handled without reading it (used when there is no
+  // Content-Length, where draining would block until the peer closes).
+  virtual void abandon() = 0;
+
+  virtual ~BodySource() = default;
+};
 
 struct UploadSessionInfo {
   std::string id;
@@ -35,9 +54,10 @@ struct ChunkResult {
 
 // Streams a raw chunk body to tmp/<session>/<index>.part. The body is always
 // consumed so that keep-alive connections stay aligned even on errors; the
-// caller passes a BodyGate so the body is read at most once per request.
+// caller passes a BodySource (BodyGate on the transport layer) so the body is
+// read at most once per request.
 ChunkResult upload_chunk(const AppContext& ctx, std::string_view session_id,
-                         uint32_t index, BodyGate& body,
+                         uint32_t index, BodySource& body,
                          bool has_content_length, int64_t content_length);
 
 // Concatenates the chunks, verifies the byte count and atomically moves the
