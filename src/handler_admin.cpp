@@ -54,7 +54,7 @@ void handle_admin_status(const AppContext& ctx, const httplib::Request& req,
     data["audit_total"] = audit_count();
     data["uptime_seconds"] = ctx.started_at > 0 ? now - ctx.started_at : 0;
     data["chunk_size_mb"] = ctx.cfg.chunk_size_mb;
-    data["version"] = "1.0.0";
+    data["version"] = "1.1.0";
     scope.ok(std::move(data));
   });
 }

@@ -37,7 +37,7 @@ void print_usage() {
       "      --version         Show the version\n");
 }
 
-void print_version() { std::printf("file-server 1.0.0\n"); }
+void print_version() { std::printf("file-server 1.1.0\n"); }
 
 void ensure_directories(const fsrv::AppContext& ctx) {
   std::error_code ec;

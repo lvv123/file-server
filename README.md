@@ -22,7 +22,7 @@
 
 **方式一：下载预编译版本（Windows x64）**
 
-从 [Releases](https://github.com/lvv123/file-server/releases) 下载 `file-server-1.0.0-win64.zip`，解压后直接运行：
+从 [Releases](https://github.com/lvv123/file-server/releases) 下载 `file-server-1.1.0-win64.zip`，解压后直接运行：
 
 ```bat
 file-server.exe -c config.json
