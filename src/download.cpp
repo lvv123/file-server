@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <memory>
+#include <string_view>
 #include <vector>
 
 #include "error.h"
@@ -17,14 +18,50 @@ namespace {
 constexpr size_t kReadBuffer = 64 * 1024;
 
 #if defined(_WIN32)
+#include <fcntl.h>
+#include <io.h>
+#include <windows.h>
+
 using FileOffset = __int64;
 int seek_file(std::FILE* f, FileOffset offset) {
   return _fseeki64(f, offset, SEEK_SET);
+}
+
+// std::fopen opens with _SH_DENYNO, which still omits FILE_SHARE_DELETE: while
+// a download is streaming, replacing or deleting the same file fails with a
+// sharing violation. Open with every sharing mode allowed instead.
+std::FILE* open_for_reading(const fs::path& p) {
+  HANDLE h = ::CreateFileW(
+      p.wstring().c_str(), GENERIC_READ,
+      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+      OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (h == INVALID_HANDLE_VALUE) {
+    throw io_error_win32("cannot open file for reading: " + p.u8string(),
+                         ::GetLastError());
+  }
+  const int fd =
+      ::_open_osfhandle(reinterpret_cast<intptr_t>(h), _O_RDONLY | _O_BINARY);
+  if (fd == -1) {
+    ::CloseHandle(h);
+    throw io_error("cannot open file for reading", EMFILE);
+  }
+  std::FILE* f = ::_fdopen(fd, "rb");
+  if (!f) {
+    ::_close(fd);
+    throw io_error("cannot open file for reading", EBADF);
+  }
+  return f;
 }
 #else
 using FileOffset = off_t;
 int seek_file(std::FILE* f, FileOffset offset) {
   return fseeko(f, offset, SEEK_SET);
+}
+
+std::FILE* open_for_reading(const fs::path& p) {
+  std::FILE* f = std::fopen(p.u8string().c_str(), "rb");
+  if (!f) throw io_error("cannot open file for reading", errno);
+  return f;
 }
 #endif
 
@@ -66,6 +103,12 @@ void download_file(const AppContext& ctx, const httplib::Request& req,
   // cpp-httplib re-applies Range to every ContentProvider response on its own.
   // We parse Range manually (per the specification), so clear the framework's
   // parsed copy to avoid slicing the already-sliced stream a second time.
+  // This relies on `req.ranges` still being the parsed header at handler time;
+  // the assert below fails loudly if an upgrade changes that contract.
+  static_assert(
+      std::string_view(CPPHTTPLIB_VERSION) == std::string_view("0.18.3"),
+      "cpp-httplib changed: re-verify manual Range handling (206/416) and "
+      "this workaround before bumping the dependency");
   const_cast<httplib::Request&>(req).ranges.clear();
 
   const fs::path path = ctx.paths.resolve(req.get_param_value("path"));
@@ -114,8 +157,7 @@ void download_file(const AppContext& ctx, const httplib::Request& req,
 
   const uint64_t length = (size == 0) ? 0 : (end - start + 1);
 
-  std::FILE* f = std::fopen(path.u8string().c_str(), "rb");
-  if (!f) throw io_error("cannot open file for reading", errno);
+  std::FILE* f = open_for_reading(path);
 
   if (size > 0 && seek_file(f, static_cast<FileOffset>(start)) != 0) {
     std::fclose(f);

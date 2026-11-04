@@ -1,8 +1,10 @@
 #include "fsops.h"
 
 #include <cerrno>
+#include <chrono>
 #include <cstring>
 #include <system_error>
+#include <thread>
 
 #include "error.h"
 #include "util.h"
@@ -140,9 +142,33 @@ bool same_volume(const fs::path& a, const fs::path& b) {
 
 void atomic_replace(const fs::path& src, const fs::path& dst) {
 #if defined(_WIN32)
-  if (!MoveFileExW(src.wstring().c_str(), dst.wstring().c_str(),
-                   MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-    throw io_error_win32("cannot replace " + dst.u8string(), GetLastError());
+  // MoveFileExW refuses to replace a file that another process has open, even
+  // when that reader shared delete access: it reports ACCESS_DENIED, which is a
+  // permanent refusal rather than a transient lock, so retrying alone never
+  // helps. ReplaceFileW is the API that does work against an open target, so
+  // fall back to it before giving up.
+  constexpr int kAttempts = 5;
+  for (int attempt = 1;; ++attempt) {
+    if (MoveFileExW(src.wstring().c_str(), dst.wstring().c_str(),
+                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+      return;
+    }
+    DWORD err = GetLastError();
+    if (err == ERROR_ACCESS_DENIED || err == ERROR_SHARING_VIOLATION) {
+      // ReplaceFileW needs an existing destination; when there is none,
+      // MoveFileExW above has already succeeded.
+      if (ReplaceFileW(dst.wstring().c_str(), src.wstring().c_str(), nullptr,
+                       REPLACEFILE_WRITE_THROUGH, nullptr, nullptr)) {
+        return;
+      }
+      err = GetLastError();
+    }
+    if ((err == ERROR_SHARING_VIOLATION || err == ERROR_ACCESS_DENIED) &&
+        attempt < kAttempts) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(50 * attempt));
+      continue;
+    }
+    throw io_error_win32("cannot replace " + dst.u8string(), err);
   }
 #else
   if (::rename(src.c_str(), dst.c_str()) != 0) {

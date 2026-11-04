@@ -45,7 +45,9 @@ void audit_background(const std::string& action, const std::string& result,
                       const std::string& error, int64_t duration_ms) {
   AuditRow row;
   row.ts = now_sec();
-  row.client_ip = "127.0.0.1";
+  // Not a real client: keep it distinct from genuine loopback requests so that
+  // maintenance activity cannot be mistaken for an admin action from 127.0.0.1.
+  row.client_ip = "internal";
   row.action = action;
   row.result = result;
   row.error = error;

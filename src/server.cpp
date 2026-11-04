@@ -13,13 +13,21 @@ namespace fsrv {
 
 namespace {
 
+// Single place that builds the error envelope, so the shape cannot drift between
+// the static fallback, the error handler and the handlers themselves.
+std::string error_envelope(const char* code, const std::string& message) {
+  Json body;
+  body["ok"] = false;
+  body["error"] = Json{{"code", code}, {"message", message}};
+  return body.dump();
+}
+
 void serve_asset(const std::string& path, httplib::Response& res) {
   const StaticAsset* asset = find_static_asset(path);
   if (!asset) {
     res.status = 404;
-    res.set_content(
-        R"({"ok":false,"error":{"code":"NOT_FOUND","message":"not found"}})",
-        "application/json; charset=utf-8");
+    res.set_content(error_envelope("NOT_FOUND", "not found"),
+                    "application/json; charset=utf-8");
     return;
   }
   res.set_header("Cache-Control", "no-cache");
@@ -134,12 +142,9 @@ void FileServer::register_routes() {
     // Unknown API routes must not fall through to the static handler: they owe
     // the client a JSON error envelope, not an "asset not found" body.
     if (req.path.rfind("/api/", 0) == 0 || req.path.rfind("/admin/", 0) == 0) {
-      Json err;
-      err["ok"] = false;
-      err["error"] = Json{{"code", "ENDPOINT_NOT_FOUND"},
-                          {"message", "endpoint not found"}};
       res.status = 404;
-      res.set_content(err.dump(), "application/json; charset=utf-8");
+      res.set_content(error_envelope("ENDPOINT_NOT_FOUND", "endpoint not found"),
+                      "application/json; charset=utf-8");
       return;
     }
     serve_asset(req.path, res);
@@ -161,23 +166,19 @@ void FileServer::register_routes() {
                      req.path.rfind("/admin/", 0) == 0;
     if (!api) { return httplib::Server::HandlerResponse::Unhandled; }
 
-    Json body;
-    body["ok"] = false;
+    std::string body;
     if (res.status == 404) {
-      body["error"] = Json{{"code", "ENDPOINT_NOT_FOUND"},
-                           {"message", "endpoint not found"}};
+      body = error_envelope("ENDPOINT_NOT_FOUND", "endpoint not found");
     } else if (res.status == 413) {
-      body["error"] = Json{{"code", "PAYLOAD_TOO_LARGE"},
-                           {"message", "request body is too large"}};
+      body = error_envelope("PAYLOAD_TOO_LARGE", "request body is too large");
     } else if (res.status == 411) {
-      body["error"] = Json{{"code", "LENGTH_REQUIRED"},
-                           {"message", "Content-Length header is required"}};
+      body = error_envelope("LENGTH_REQUIRED", "Content-Length header is required");
     } else {
-      body["error"] = Json{{"code", "HTTP_ERROR"},
-                           {"message", "request failed with status " +
-                                           std::to_string(res.status)}};
+      body = error_envelope(
+          "HTTP_ERROR",
+          "request failed with status " + std::to_string(res.status));
     }
-    res.set_content(body.dump(), "application/json; charset=utf-8");
+    res.set_content(body, "application/json; charset=utf-8");
     return httplib::Server::HandlerResponse::Handled;
   });
 

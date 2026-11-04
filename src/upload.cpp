@@ -179,9 +179,12 @@ UploadSessionInfo upload_init(const AppContext& ctx, std::string_view user_path,
                       "FILE_TOO_LARGE");
   }
 
-  // Reserve room for the incoming bytes plus the temporary copy that exists
-  // while the chunks are merged.
-  const uint64_t needed = static_cast<uint64_t>(total_size) + 8ULL * 1024 * 1024;
+  // Peak usage is two copies: the chunks in tmp/ plus the merged file that is
+  // built next to the target. Reject up front instead of failing halfway
+  // through the merge.
+  const uint64_t size_bytes = static_cast<uint64_t>(total_size);
+  const uint64_t needed =
+      size_bytes > (UINT64_MAX / 2) ? UINT64_MAX : size_bytes * 2 + 8ULL * 1024 * 1024;
   const uint64_t available = free_bytes(ctx.tmp_root);
   if (available > 0 && available < needed) {
     throw disk_full("not enough free space: need " + human_size(needed) +
@@ -231,6 +234,9 @@ UploadSessionInfo upload_received(const AppContext& ctx,
     std::shared_lock<std::shared_mutex> io_lock(locks->io);
     auto row = session_get(id);
     if (!row) {
+      // Drop the lock entry too: otherwise an attacker (or a client with a
+      // stale id) grows g_lock_map by one entry per request, forever.
+      forget_session_locks(id);
       throw not_found("upload session not found", "SESSION_NOT_FOUND");
     }
     if (row->expires_at > now_sec()) {
@@ -267,7 +273,10 @@ ChunkResult upload_chunk(const AppContext& ctx, std::string_view session_id,
   std::shared_lock<std::shared_mutex> io_lock(locks->io);
 
   auto row = session_get(id);
-  if (!row) throw not_found("upload session not found", "SESSION_NOT_FOUND");
+  if (!row) {
+    forget_session_locks(id);
+    throw not_found("upload session not found", "SESSION_NOT_FOUND");
+  }
   if (row->expires_at <= now_sec()) {
     throw not_found("upload session has expired", "SESSION_EXPIRED");
   }
@@ -391,7 +400,10 @@ void upload_complete(const AppContext& ctx, std::string_view session_id) {
   std::unique_lock<std::shared_mutex> io_lock(locks->io);
 
   auto row = session_get(id);
-  if (!row) throw not_found("upload session not found", "SESSION_NOT_FOUND");
+  if (!row) {
+    forget_session_locks(id);
+    throw not_found("upload session not found", "SESSION_NOT_FOUND");
+  }
   if (row->expires_at <= now_sec()) {
     throw not_found("upload session has expired", "SESSION_EXPIRED");
   }
@@ -473,7 +485,11 @@ void upload_complete(const AppContext& ctx, std::string_view session_id) {
     bool is_dir = false;
     int64_t size = row->total_size;
     int64_t mtime = now_sec();
-    stat_path(target, is_dir, size, mtime);
+    if (!stat_path(target, is_dir, size, mtime)) {
+      // The rename succeeded but we cannot read the result back. Do not index
+      // guessed metadata: keep the session so the client can retry.
+      throw internal_error("cannot stat the merged file after replacing it");
+    }
     files_upsert(row->target_rel_path, false, size, mtime);
   } catch (...) {
     if (out) std::fclose(out);

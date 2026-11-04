@@ -978,6 +978,61 @@ try {
         Assert-Eq $r.Status 404 "status"
     }
 
+    # ---------------------------------------- concurrent replace while reading
+    Write-Head "IT-R replacing or deleting a file that is being downloaded"
+
+    Check "IT-R1 overwriting a file while it is being downloaded succeeds" {
+        $data = New-PatternBytes (3 * 1024 * 1024)
+        Upload-Bytes "/live/held.bin" $data | Out-Null
+
+        # Hold the file open: send the request and never read the body, so the
+        # server blocks writing and keeps its handle on the file.
+        $tcp = New-Object System.Net.Sockets.TcpClient
+        $tcp.Connect("127.0.0.1", $script:Port)
+        $stream = $tcp.GetStream()
+        $req = "GET /api/download?path=/live/held.bin HTTP/1.1`r`nHost: 127.0.0.1`r`nConnection: close`r`n`r`n"
+        $bytes = [System.Text.Encoding]::ASCII.GetBytes($req)
+        try {
+            $stream.Write($bytes, 0, $bytes.Length)
+            $stream.Flush()
+            Start-Sleep -Milliseconds 300
+
+            $replacement = New-PatternBytes (64 * 1024)
+            Upload-Bytes "/live/held.bin" $replacement | Out-Null
+        } finally {
+            $tcp.Close()
+        }
+
+        $back = Read-ServerFile "/live/held.bin"
+        Assert-Eq $back.Length $replacement.Length "size after overwrite"
+    }
+
+    Check "IT-R2 deleting a file while it is being downloaded succeeds" {
+        $data = New-PatternBytes (3 * 1024 * 1024)
+        Upload-Bytes "/live2/doomed.bin" $data | Out-Null
+
+        $tcp = New-Object System.Net.Sockets.TcpClient
+        $tcp.Connect("127.0.0.1", $script:Port)
+        $stream = $tcp.GetStream()
+        $req = "GET /api/download?path=/live2/doomed.bin HTTP/1.1`r`nHost: 127.0.0.1`r`nConnection: close`r`n`r`n"
+        $bytes = [System.Text.Encoding]::ASCII.GetBytes($req)
+        try {
+            $stream.Write($bytes, 0, $bytes.Length)
+            $stream.Flush()
+            Start-Sleep -Milliseconds 300
+
+            $r = Invoke-Rest -Method DELETE -Path "/api/files?path=/live2/doomed.bin"
+            Assert-Ok $r
+        } finally {
+            $tcp.Close()
+        }
+
+        # A separate directory, so IT-R1's replacement file cannot leak into the
+        # count and mask a real failure here.
+        $list = Invoke-Rest -Method GET -Path "/api/files?path=/live2"
+        Assert-Eq @((Get-Data $list).entries).Count 0 "directory is empty"
+    }
+
     # ---------------------------------------------------------------- disk
     Write-Head "IT-Q disk full"
 
