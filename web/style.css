@@ -186,6 +186,55 @@ main { padding: 0 20px 40px; }
 .admin .card .value { font-size: 20px; font-weight: 600; margin-top: 4px; }
 .admin table.listing { background: var(--panel); }
 
+/* In-page dialogs. Native prompt()/confirm() are unreliable on some mobile
+   browsers: the dialog appears but its input never receives focus. */
+.dialog {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  background: rgba(15, 23, 42, 0.45);
+  padding: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.dialog[hidden] { display: none; }
+.dialog-panel {
+  width: 100%;
+  max-width: 420px;
+  max-height: calc(100vh - 40px);
+  overflow: auto;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 24px 60px rgba(15, 23, 42, 0.28);
+  padding: 20px 22px;
+}
+.dialog-panel h2 { margin: 0 0 12px; font-size: 18px; }
+.dialog-message {
+  margin: 0 0 12px;
+  color: var(--muted);
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.dialog-input {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 16px; /* prevents iOS from zooming the page on focus */
+  -webkit-appearance: none;
+  appearance: none;
+}
+.dialog-input:focus {
+  outline: 2px solid rgba(37, 99, 235, 0.2);
+  outline-offset: 1px;
+  border-color: var(--accent);
+}
+.dialog-actions { display: flex; gap: 8px; margin-top: 16px; }
+.dialog-actions .btn { flex: 1 1 0; min-height: 44px; }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
 .toast {
   position: fixed;
   bottom: 24px;
@@ -345,6 +394,13 @@ main { padding: 0 20px 40px; }
   .admin .listing td:nth-child(1),
   .admin .listing td:nth-child(4) { flex: 1 1 100%; }
   .admin .listing td.num { text-align: left; }
+
+  .dialog { padding: 12px; }
+  .dialog-panel {
+    max-width: none;
+    max-height: calc(100vh - 24px);
+    padding: 18px;
+  }
 
   .toast {
     bottom: calc(16px + env(safe-area-inset-bottom));

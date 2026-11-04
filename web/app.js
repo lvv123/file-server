@@ -42,6 +42,133 @@ function toast(message, isError) {
   toastTimer = setTimeout(() => { el.hidden = true; }, 3500);
 }
 
+// ---------------------------------------------------------------------------
+// In-page dialogs
+//
+// Native prompt()/confirm() are unreliable on some mobile browsers: the
+// dialog appears, but its input never receives focus and the keyboard never
+// opens. These dialogs are ordinary DOM elements, so tapping the field always
+// works even if programmatic focus is ignored.
+// ---------------------------------------------------------------------------
+
+let dialogResolve = null;
+let dialogCancelValue = null;
+let dialogPreviousFocus = null;
+let dialogPreviousOverflow = '';
+
+function focusElement(element) {
+  try {
+    element.focus({ preventScroll: true });
+  } catch (e) {
+    element.focus();
+  }
+}
+
+function closeDialog(result) {
+  const dialog = document.getElementById('dialog');
+  if (!dialog || dialog.hidden) return;
+
+  dialog.hidden = true;
+  document.body.style.overflow = dialogPreviousOverflow;
+
+  const resolve = dialogResolve;
+  dialogResolve = null;
+  const previous = dialogPreviousFocus;
+  dialogPreviousFocus = null;
+  if (previous && typeof previous.focus === 'function') {
+    focusElement(previous);
+  }
+  if (resolve) resolve(result);
+}
+
+function openDialog(options) {
+  const dialog = document.getElementById('dialog');
+  const title = document.getElementById('dialog-title');
+  const message = document.getElementById('dialog-message');
+  const input = document.getElementById('dialog-input');
+  const ok = document.getElementById('dialog-ok');
+  const cancel = document.getElementById('dialog-cancel');
+
+  if (dialogResolve) closeDialog(dialogCancelValue);
+
+  dialogPreviousFocus = document.activeElement;
+  dialogPreviousOverflow = document.body.style.overflow;
+  dialogCancelValue = options.input ? null : false;
+
+  title.textContent = options.title || '';
+  message.textContent = options.message || '';
+  message.hidden = !options.message;
+  input.hidden = !options.input;
+  input.value = options.value || '';
+  ok.textContent = options.confirmText || '确定';
+  ok.className = 'btn ' + (options.danger ? 'danger' : 'primary');
+  ok.disabled = !!options.input && !input.value.trim();
+  cancel.textContent = options.cancelText || '取消';
+
+  const submit = () => {
+    if (!options.input) {
+      closeDialog(true);
+      return;
+    }
+    const value = input.value.trim();
+    if (!value) return;
+    closeDialog(value);
+  };
+
+  ok.onclick = submit;
+  cancel.onclick = () => closeDialog(dialogCancelValue);
+  dialog.onclick = (event) => {
+    if (event.target === dialog) closeDialog(dialogCancelValue);
+  };
+  input.oninput = () => {
+    if (options.input) ok.disabled = !input.value.trim();
+  };
+  input.onkeydown = (event) => {
+    if (event.key === 'Enter' && !event.isComposing) {
+      event.preventDefault();
+      submit();
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      closeDialog(dialogCancelValue);
+    }
+  };
+  document.onkeydown = (event) => {
+    if (event.key === 'Escape' && !dialog.hidden) {
+      event.preventDefault();
+      closeDialog(dialogCancelValue);
+    }
+  };
+
+  document.body.style.overflow = 'hidden';
+  dialog.hidden = false;
+
+  return new Promise((resolve) => {
+    dialogResolve = resolve;
+    const target = options.input ? input : ok;
+    // Focus synchronously while still inside the click gesture so mobile
+    // browsers open the virtual keyboard.
+    focusElement(target);
+    if (options.input) input.select();
+    // After the keyboard animation the visual viewport may shift; keep the
+    // field visible.
+    window.setTimeout(() => {
+      if (dialog.hidden) return;
+      if (document.activeElement !== target) {
+        focusElement(target);
+      }
+      if (options.input) input.scrollIntoView({ block: 'center' });
+    }, 120);
+  });
+}
+
+function showTextDialog(title, value) {
+  return openDialog({ title, value, input: true });
+}
+
+function showConfirmDialog(title, message, confirmText, danger) {
+  return openDialog({ title, message, confirmText, danger, input: false });
+}
+
 async function api(method, url, body) {
   const options = { method, headers: {} };
   if (body !== undefined) {
@@ -175,7 +302,7 @@ async function navigate(path) {
 // ---------------------------------------------------------------------------
 
 async function doMkdir() {
-  const name = prompt('新建文件夹名称：');
+  const name = await showTextDialog('新建文件夹', '');
   if (!name) return;
   try {
     await api('POST', '/api/mkdir', { path: joinPath(state.dir, name) });
@@ -187,7 +314,7 @@ async function doMkdir() {
 }
 
 async function doRename(entry) {
-  const name = prompt('新的名称：', entry.name);
+  const name = await showTextDialog('重命名', entry.name);
   if (!name || name === entry.name) return;
   try {
     await api('POST', '/api/rename', {
@@ -202,7 +329,13 @@ async function doRename(entry) {
 }
 
 async function doDelete(entry) {
-  if (!confirm(`确定删除 “${entry.name}” 吗？此操作不可恢复。`)) return;
+  const ok = await showConfirmDialog(
+    '删除',
+    `确定删除 “${entry.name}” 吗？此操作不可恢复。`,
+    '删除',
+    true,
+  );
+  if (!ok) return;
   try {
     await api('DELETE', '/api/files?path=' + encodeURIComponent(entry.path));
     toast('已删除');
